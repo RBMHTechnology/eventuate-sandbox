@@ -1,10 +1,10 @@
 package com.rbmhtechnology.eventuate.sandbox
 
 import akka.actor._
-
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
+import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 
 import scala.collection.immutable.Seq
 
@@ -92,6 +92,8 @@ trait EventSubscribers {
 class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter], val sourceFilter: ReplicationFilter) extends Actor with EventLogOps with EventSubscribers {
   import EventLog._
 
+  import context.system
+
   override def receive = {
     case Subscribe(subscriber) =>
       subscribe(subscriber)
@@ -126,9 +128,9 @@ object EventLog {
   def props(id: String, targetFilters: Map[String, ReplicationFilter], sourceFilter: ReplicationFilter): Props =
     Props(new EventLog(id, targetFilters, sourceFilter))
 
-  def encode(events: Seq[DecodedEvent]): Seq[EncodedEvent] =
-    events.map(_.encode)
+  def encode(events: Seq[DecodedEvent])(implicit system: ActorSystem): Seq[EncodedEvent] =
+    events.map(EventPayloadSerializer.encode)
 
-  def decode(events: Seq[EncodedEvent]): Seq[DecodedEvent] =
-    events.map(_.decode)
+  def decode(events: Seq[EncodedEvent])(implicit system: ActorSystem): Seq[DecodedEvent] =
+    events.map(e => EventPayloadSerializer.decode(e).get)
 }

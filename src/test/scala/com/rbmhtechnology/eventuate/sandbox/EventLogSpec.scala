@@ -4,11 +4,13 @@ import akka.actor._
 import akka.pattern.ask
 import akka.testkit._
 import akka.util.Timeout
-
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
-
+import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 import org.scalatest._
+import org.scalatest.concurrent.ScalaFutures
+import org.scalatest.time.Millis
+import org.scalatest.time.Span
 
 import scala.collection.immutable.Seq
 
@@ -20,16 +22,16 @@ object EventLogSpec {
   val LogId2 = "L2"
   val LogId3 = "L3"
 
-  class ExcludePayload(payload: String) extends ReplicationFilter {
+  class ExcludePayload(payload: String)(implicit system: ActorSystem) extends ReplicationFilter {
     override def apply(event: EncodedEvent): Boolean =
-      event.decode.payload != payload
+      EventPayloadSerializer.decode(event).get.payload != payload
   }
 
-  def excludePayload(payload: String): ReplicationFilter =
+  def excludePayload(payload: String)(implicit system: ActorSystem): ReplicationFilter =
     new ExcludePayload(payload)
 }
 
-class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike with Matchers with BeforeAndAfterEach with BeforeAndAfterAll {
+class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with Matchers with BeforeAndAfterEach with BeforeAndAfterAll with ScalaFutures {
   import EventLogSpec._
   import EventLog._
 
@@ -40,6 +42,9 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike w
 
   implicit val timeout =
     Timeout(settings.askTimeout)
+
+  implicit override val patienceConfig =
+    PatienceConfig(timeout = Span(timeout.duration.toMillis, Millis), interval = Span(100, Millis))
 
   override protected def beforeEach(): Unit =
     log = system.actorOf(EventLog.props(LogId1, Map(LogId2 -> excludePayload("y")), excludePayload("z")))
@@ -60,13 +65,13 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike w
         DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 1L, VectorTime(LogId1 -> 1L)), "a"),
         DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 2L, VectorTime(LogId1 -> 2L)), "b"))
 
-      log.ask(Write(emitted)).map {
+      whenReady(log.ask(Write(emitted))) {
         case WriteSuccess(events) => events should be(expected)
       }
-      log.ask(Read(1L)).map {
+      whenReady(log.ask(Read(1L))) {
         case ReadSuccess(events) => events should be(expected)
       }
-      log.ask(Read(2L)).map {
+      whenReady(log.ask(Read(2L))) {
         case ReadSuccess(events) => events should be(expected.tail)
       }
     }
@@ -79,17 +84,17 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike w
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"),
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
 
-      log.ask(ReplicationWrite(encode(replicated), Map(LogId2 -> 2L))).map {
+      whenReady(log.ask(ReplicationWrite(encode(replicated), Map(LogId2 -> 2L)))) {
         case ReplicationWriteSuccess(events, progresses, versionVector) =>
           decode(events) should be(expected)
           progresses should be(Map(LogId2 -> 2L))
           versionVector should be(VectorTime(LogId2 -> 2L))
       }
-      log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero)).map {
+      whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero))) {
         case ReplicationReadSuccess(events, progress) =>
           decode(events) should be(expected)
       }
-      log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime(LogId2 -> 1L))).map {
+      whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime(LogId2 -> 1L)))) {
         case ReplicationReadSuccess(events, progress) =>
           decode(events) should be(expected.drop(1))
       }
@@ -105,15 +110,15 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike w
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "y"),
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 3L, VectorTime(LogId2 -> 3L)), "z"))
 
-      log.ask(ReplicationWrite(encode(replicated), Map(LogId2 -> 2L))).map {
+      whenReady(log.ask(ReplicationWrite(encode(replicated), Map(LogId2 -> 2L)))) {
         case ReplicationWriteSuccess(events, progresses, _) =>
           decode(events) should be(expected)
       }
-      log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero)).map {
+      whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero))) {
         case ReplicationReadSuccess(events, progress) =>
           decode(events) should be(expected.take(1))
       }
-      log.ask(ReplicationRead(1L, settings.batchSize, LogId3, VectorTime.Zero)).map {
+      whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId3, VectorTime.Zero))) {
         case ReplicationReadSuccess(events, progress) =>
           decode(events) should be(expected.take(2))
       }
@@ -130,8 +135,6 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike w
 
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 1L, VectorTime(LogId1 -> 1L)), "a"))
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 2L, VectorTime(LogId1 -> 2L)), "b"))
-
-      succeed
     }
     "publish on ReplicationWrite" in {
       val replicated = Seq(
@@ -145,8 +148,6 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with AsyncWordSpecLike w
 
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"))
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
-
-      succeed
     }
   }
 }
