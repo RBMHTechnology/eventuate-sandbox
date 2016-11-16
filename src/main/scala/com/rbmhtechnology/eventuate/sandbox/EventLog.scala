@@ -108,10 +108,10 @@ class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter]
       val decoded = encoded.zip(events).map { case (enc, dec) => dec.copy(enc.metadata) }
       sender() ! WriteSuccess(decoded)
       publish(decoded)
-    case ReplicationWrite(events, progresses) =>
-      val encoded = replicationWrite(events); progressWrite(progresses)
+    case ReplicationWrite(events, sourceLogId, progress) =>
+      val encoded = replicationWrite(events); progressWrite(Map(sourceLogId -> progress))
       val decoded = decode(encoded)
-      sender() ! ReplicationWriteSuccess(encoded, progresses, versionVector)
+      sender() ! ReplicationWriteSuccess(encoded, sourceLogId, progress, versionVector)
       publish(decoded)
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)

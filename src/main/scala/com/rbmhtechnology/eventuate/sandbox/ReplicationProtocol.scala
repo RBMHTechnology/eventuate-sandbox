@@ -14,6 +14,6 @@ object ReplicationProtocol {
   case class ReplicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime)
   case class ReplicationReadSuccess(events: Seq[EncodedEvent], progress: Long)
 
-  case class ReplicationWrite(events: Seq[EncodedEvent], progresses: Map[String, Long])
-  case class ReplicationWriteSuccess(events: Seq[EncodedEvent], progresses: Map[String, Long], targetVersionVector: VectorTime)
+  case class ReplicationWrite(events: Seq[EncodedEvent], sourceLogId: String, progress: Long)
+  case class ReplicationWriteSuccess(events: Seq[EncodedEvent], sourceLogId: String, progress: Long, targetVersionVector: VectorTime)
 }

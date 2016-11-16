@@ -140,9 +140,9 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
   }
 
   val writing: Receive = {
-    case ReplicationWriteSuccess(_, progresses, targetVersionVector) =>
+    case ReplicationWriteSuccess(_, _, progress, targetVersionVector) =>
       context.become(reading)
-      read(progresses(sourceLogId) + 1L, targetVersionVector)
+      read(progress + 1L, targetVersionVector)
   }
 
   override def receive = fetching
@@ -157,7 +157,7 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
     sourceLog.ask(ReplicationRead(fromSequenceNr, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
 
   private def write(events: Seq[EncodedEvent], progress: Long): Unit =
-    targetLog.ask(ReplicationWrite(events, Map(sourceLogId -> progress)))(settings.askTimeout).pipeTo(self)
+    targetLog.ask(ReplicationWrite(events, sourceLogId, progress))(settings.askTimeout).pipeTo(self)
 
   override def preStart(): Unit =
     fetch()

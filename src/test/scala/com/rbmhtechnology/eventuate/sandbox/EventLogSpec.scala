@@ -84,10 +84,11 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"),
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
 
-      whenReady(log.ask(ReplicationWrite(encode(replicated), Map(LogId2 -> 2L)))) {
-        case ReplicationWriteSuccess(events, progresses, versionVector) =>
+      whenReady(log.ask(ReplicationWrite(encode(replicated), LogId2, 2L))) {
+        case ReplicationWriteSuccess(events, sourceLogId, progress, versionVector) =>
           decode(events) should be(expected)
-          progresses should be(Map(LogId2 -> 2L))
+          sourceLogId should be(LogId2)
+          progress should be(2L)
           versionVector should be(VectorTime(LogId2 -> 2L))
       }
       whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero))) {
@@ -110,8 +111,8 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "y"),
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 3L, VectorTime(LogId2 -> 3L)), "z"))
 
-      whenReady(log.ask(ReplicationWrite(encode(replicated), Map(LogId2 -> 2L)))) {
-        case ReplicationWriteSuccess(events, progresses, _) =>
+      whenReady(log.ask(ReplicationWrite(encode(replicated), LogId2, 2L))) {
+        case ReplicationWriteSuccess(events, _, _, _) =>
           decode(events) should be(expected)
       }
       whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero))) {
@@ -144,7 +145,7 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
       val probe = TestProbe()
 
       log ! Subscribe(probe.ref)
-      log ? ReplicationWrite(encode(replicated), Map(LogId2 -> 2L))
+      log ? ReplicationWrite(encode(replicated), LogId2, 2L)
 
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"))
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
