@@ -5,7 +5,7 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
-
+import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.StopOnUnserializableKeepOthers
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.typesafe.config._
@@ -23,6 +23,8 @@ class ReplicationEndpoint(
   logNames: Set[String],
   targetFilters: Map[String, ReplicationFilter],
   sourceFilters: Map[String, ReplicationFilter],
+  // TODO move to connect
+  eventCompatibilityFilter: EventReplicationDecider = StopOnUnserializableKeepOthers,
   config: Config = ConfigFactory.empty()) {
 
   import ReplicationEndpoint._
@@ -74,7 +76,7 @@ class ReplicationEndpoint(
     system.actorOf(Props(new ReplicationConnectionAcceptor(id, eventLogs)))
 
   private def createEventLog(logName: String): ActorRef =
-    system.actorOf(EventLog.props(logId(id, logName), targetFilters, sourceFilters.getOrElse(logName, NoFilter)))
+    system.actorOf(EventLog.props(logId(id, logName), targetFilters, sourceFilters.getOrElse(logName, NoFilter), eventCompatibilityFilter))
 
   private def createReplicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: String, targetLog: ActorRef): ActorRef =
     system.actorOf(Props(new Replicator(sourceLogId, sourceLog, targetLogId, targetLog)))

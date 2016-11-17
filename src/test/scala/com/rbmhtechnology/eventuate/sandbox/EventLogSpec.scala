@@ -2,8 +2,11 @@ package com.rbmhtechnology.eventuate.sandbox
 
 import akka.actor._
 import akka.pattern.ask
+import akka.serialization.Serialization
+import akka.serialization.SerializationExtension
 import akka.testkit._
 import akka.util.Timeout
+import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.StopOnUnserializableKeepOthers
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
@@ -22,12 +25,12 @@ object EventLogSpec {
   val LogId2 = "L2"
   val LogId3 = "L3"
 
-  class ExcludePayload(payload: String)(implicit system: ActorSystem) extends ReplicationFilter {
+  class ExcludePayload(payload: String)(implicit serialization: Serialization) extends ReplicationFilter {
     override def apply(event: EncodedEvent): Boolean =
       EventPayloadSerializer.decode(event).get.payload != payload
   }
 
-  def excludePayload(payload: String)(implicit system: ActorSystem): ReplicationFilter =
+  def excludePayload(payload: String)(implicit serialization: Serialization): ReplicationFilter =
     new ExcludePayload(payload)
 }
 
@@ -46,8 +49,10 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
   implicit override val patienceConfig =
     PatienceConfig(timeout = Span(timeout.duration.toMillis, Millis), interval = Span(100, Millis))
 
+  implicit val serialization: Serialization = SerializationExtension(system)
+
   override protected def beforeEach(): Unit =
-    log = system.actorOf(EventLog.props(LogId1, Map(LogId2 -> excludePayload("y")), excludePayload("z")))
+    log = system.actorOf(EventLog.props(LogId1, Map(LogId2 -> excludePayload("y")), excludePayload("z"), StopOnUnserializableKeepOthers))
 
   override protected def afterEach(): Unit =
     system.stop(log)

@@ -4,10 +4,8 @@ import akka.actor._
 import akka.pattern.ask
 import akka.testkit._
 import akka.util.Timeout
-
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint._
-
 import org.scalatest._
 
 object ReplicationEndpointSpec {
