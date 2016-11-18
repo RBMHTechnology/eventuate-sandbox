@@ -5,6 +5,8 @@ import akka.actor.ActorRef
 import scala.collection.immutable.Seq
 
 object ReplicationProtocol {
+  case class AddDirectedFilter(logId: String, filter: ReplicationFilter)
+
   case class GetReplicationSourceLogs(logNames: Set[String])
   case class GetReplicationSourceLogsSuccess(endpointId: String, sourceLogs: Map[String, ActorRef])
 

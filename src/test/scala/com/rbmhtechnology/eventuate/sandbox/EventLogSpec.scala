@@ -46,8 +46,10 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
   implicit override val patienceConfig =
     PatienceConfig(timeout = Span(timeout.duration.toMillis, Millis), interval = Span(100, Millis))
 
-  override protected def beforeEach(): Unit =
-    log = system.actorOf(EventLog.props(LogId1, Map(LogId2 -> excludePayload("y")), excludePayload("z")))
+  override protected def beforeEach(): Unit = {
+    log = system.actorOf(EventLog.props(LogId1, excludePayload("z")))
+    log ! AddDirectedFilter(LogId2, excludePayload("y"))
+  }
 
   override protected def afterEach(): Unit =
     system.stop(log)

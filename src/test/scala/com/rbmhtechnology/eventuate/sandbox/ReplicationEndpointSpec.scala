@@ -33,8 +33,8 @@ class ReplicationEndpointSpec extends TestKit(ActorSystem("test")) with WordSpec
     Timeout(settings.askTimeout)
 
   override protected def beforeEach(): Unit = {
-    endpoint1 = new ReplicationEndpoint(EndpointId1, Set(LogName), Map(), Map())
-    endpoint2 = new ReplicationEndpoint(EndpointId2, Set(LogName), Map(), Map())
+    endpoint1 = new ReplicationEndpoint(EndpointId1, Set(LogName))
+    endpoint2 = new ReplicationEndpoint(EndpointId2, Set(LogName))
   }
 
   override protected def afterEach(): Unit = {
