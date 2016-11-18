@@ -18,8 +18,8 @@ trait EventLogOps {
 
   def id: String
 
-  def targetFilter(targetLogId: String): ReplicationFilter
-  def sourceFilter: ReplicationFilter
+  def defaultFilter: ReplicationFilter
+  def directedFilter(logId: String): ReplicationFilter
 
   def sequenceNr: Long =
     _sequenceNr
@@ -35,7 +35,7 @@ trait EventLogOps {
   }
 
   def replicationReadFilter(targetLogId: String, targetVersionVector: VectorTime): ReplicationFilter =
-    causalityFilter(targetVersionVector) and targetFilter(targetLogId) and sourceFilter
+    causalityFilter(targetVersionVector) and directedFilter(targetLogId) and defaultFilter
 
   def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): Seq[EncodedEvent] =
     read(fromSequenceNr).filter(replicationReadFilter(targetLogId, targetVersionVector).apply).take(num)
@@ -89,10 +89,13 @@ trait EventSubscribers {
 
 }
 
-class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter], val sourceFilter: ReplicationFilter) extends Actor with EventLogOps with EventSubscribers {
+class EventLog(val id: String, val defaultFilter: ReplicationFilter) extends Actor with EventLogOps with EventSubscribers {
   import EventLog._
-
   import context.system
+
+  /** Maps remote log ids to replication filters */
+  private var directedFilters: Map[String, ReplicationFilter] =
+    Map.empty
 
   override def receive = {
     case Subscribe(subscriber) =>
@@ -115,18 +118,20 @@ class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter]
       publish(decoded)
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
+    case AddDirectedFilter(logId, filter) =>
+      directedFilters = directedFilters.updated(logId, filter)
   }
 
-  def targetFilter(targetLogId: String): ReplicationFilter =
-    targetFilters.getOrElse(targetLogId, NoFilter)
+  def directedFilter(logId: String): ReplicationFilter =
+    directedFilters.getOrElse(logId, NoFilter)
 }
 
 object EventLog {
   def props(id: String): Props =
-    props(id, Map.empty, NoFilter)
+    props(id, NoFilter)
 
-  def props(id: String, targetFilters: Map[String, ReplicationFilter], sourceFilter: ReplicationFilter): Props =
-    Props(new EventLog(id, targetFilters, sourceFilter))
+  def props(id: String, sourceFilter: ReplicationFilter): Props =
+    Props(new EventLog(id, sourceFilter))
 
   def encode(events: Seq[DecodedEvent])(implicit system: ActorSystem): Seq[EncodedEvent] =
     events.map(EventPayloadSerializer.encode)
