@@ -21,8 +21,7 @@ object ReplicationEndpoint {
 class ReplicationEndpoint(
   val id: String,
   logNames: Set[String],
-  targetFilters: Map[String, ReplicationFilter],
-  sourceFilters: Map[String, ReplicationFilter],
+  sourceFilters: Map[String, ReplicationFilter] = Map.empty,
   config: Config = ConfigFactory.empty()) {
 
   import ReplicationEndpoint._
@@ -49,6 +48,9 @@ class ReplicationEndpoint(
   def connections: Set[String] =
     _connections.get.keySet
 
+  def addTargetFilter(targetEndpointId: String, targetLogName: String, filter: ReplicationFilter): Unit =
+    eventLogs(targetLogName) ! AddTargetFilter(logId(targetEndpointId, targetLogName), filter)
+
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
 
@@ -74,7 +76,7 @@ class ReplicationEndpoint(
     system.actorOf(Props(new ReplicationConnectionAcceptor(id, eventLogs)))
 
   private def createEventLog(logName: String): ActorRef =
-    system.actorOf(EventLog.props(logId(id, logName), targetFilters, sourceFilters.getOrElse(logName, NoFilter)))
+    system.actorOf(EventLog.props(logId(id, logName), sourceFilters.getOrElse(logName, NoFilter)))
 
   private def createReplicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: String, targetLog: ActorRef): ActorRef =
     system.actorOf(Props(new Replicator(sourceLogId, sourceLog, targetLogId, targetLog)))
