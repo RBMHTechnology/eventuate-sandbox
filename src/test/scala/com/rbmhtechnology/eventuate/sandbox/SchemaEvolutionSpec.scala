@@ -3,7 +3,6 @@ package com.rbmhtechnology.eventuate.sandbox
 import akka.actor.ActorRef
 import akka.actor.ExtendedActorSystem
 import akka.testkit.TestProbe
-import akka.util.Timeout
 import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.ReplicationDecision
 import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.Filter
 import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.Keep
@@ -83,7 +82,7 @@ object SchemaEvolutionSpec {
 
   val stopOnUnexpectedFilterMajorContinueOnMinor =
     new EventReplicationDecider {
-      override def decide(sourceLogId: String)(eventCompatibility: EventCompatibility): ReplicationDecision =
+      override def decide(eventCompatibility: EventCompatibility): ReplicationDecision =
         eventCompatibility match {
           case Compatible(event) => Keep(event)
           case MinorIncompatibility(event, _, _) => Keep(event)
@@ -109,8 +108,8 @@ class SchemaEvolutionSpec extends WordSpec with Matchers with BeforeAndAfterEach
   private var log2: ActorRef = _
 
   override protected def beforeEach(): Unit = {
-    endpoint1 = new ReplicationEndpoint(EndpointId1, Set(LogName), Map(), Map(), stopOnUnexpectedFilterMajorContinueOnMinor, serializerConfig(classOf[TestSerializer1]))
-    endpoint2 = new ReplicationEndpoint(EndpointId2, Set(LogName), Map(), Map(), stopOnUnexpectedFilterMajorContinueOnMinor, serializerConfig(classOf[TestSerializer2]))
+    endpoint1 = new ReplicationEndpoint(EndpointId1, Set(LogName), Map(), Map(), serializerConfig(classOf[TestSerializer1]))
+    endpoint2 = new ReplicationEndpoint(EndpointId2, Set(LogName), Map(), Map(), serializerConfig(classOf[TestSerializer2]))
 
     probe1 = TestProbe()(endpoint1.system)
     probe2 = TestProbe()(endpoint2.system)
@@ -120,8 +119,8 @@ class SchemaEvolutionSpec extends WordSpec with Matchers with BeforeAndAfterEach
     log1 ! Subscribe(probe1.ref)
     log2 ! Subscribe(probe2.ref)
 
-    endpoint1.connect(endpoint2)
-    endpoint2.connect(endpoint1)
+    endpoint1.connect(endpoint2, Map(LogName -> stopOnUnexpectedFilterMajorContinueOnMinor))
+    endpoint2.connect(endpoint1, Map(LogName -> stopOnUnexpectedFilterMajorContinueOnMinor))
   }
 
   override protected def afterEach(): Unit = {

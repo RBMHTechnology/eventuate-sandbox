@@ -52,7 +52,7 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
   implicit val serialization: Serialization = SerializationExtension(system)
 
   override protected def beforeEach(): Unit =
-    log = system.actorOf(EventLog.props(LogId1, Map(LogId2 -> excludePayload("y")), excludePayload("z"), StopOnUnserializableKeepOthers))
+    log = system.actorOf(EventLog.props(LogId1, Map(LogId2 -> excludePayload("y")), excludePayload("z")))
 
   override protected def afterEach(): Unit =
     system.stop(log)

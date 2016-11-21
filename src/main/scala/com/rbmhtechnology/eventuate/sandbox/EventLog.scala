@@ -29,7 +29,6 @@ trait EventLogOps {
 
   def targetFilter(targetLogId: String): ReplicationFilter
   def sourceFilter: ReplicationFilter
-  def eventCompatibilityFilter: EventReplicationDecider
 
   def sequenceNr: Long =
     _sequenceNr
@@ -105,8 +104,10 @@ trait EventSubscribers {
 
 }
 
-class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter], val sourceFilter: ReplicationFilter, val eventCompatibilityFilter: EventReplicationDecider) extends Actor with EventLogOps with EventSubscribers {
+class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter], val sourceFilter: ReplicationFilter) extends Actor with EventLogOps with EventSubscribers {
   import EventLog._
+
+  private var replicationDeciders: Map[String, EventReplicationDecider] = Map.empty
 
   private implicit val serialization =
     SerializationExtension(context.system)
@@ -140,12 +141,17 @@ class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter]
       publish(events.map(_.decoded))
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
+
+    case AddDecider(sourceLogId: String, decider: EventReplicationDecider) =>
+      replicationDeciders += sourceLogId -> decider
+    case RemoveDecider(sourceLogId: String) =>
+      replicationDeciders -= sourceLogId
   }
 
   private def split(encodedEvents: Seq[EncodedEvent], sourceLogId: String): (Stream[ReplicationDecision], Stream[ReplicationDecision]) = {
     Stream(encodedEvents: _*)
       .map(eventCompatibility)
-      .map(eventCompatibilityFilter.decide(sourceLogId))
+      .map(replicationDeciders.getOrElse(sourceLogId, StopOnUnserializableKeepOthers).decide)
       .span(replicationContinues)
   }
 
@@ -159,11 +165,15 @@ class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter]
 }
 
 object EventLog {
-  def props(id: String): Props =
-    props(id, Map.empty, NoFilter, StopOnUnserializableKeepOthers)
 
-  def props(id: String, targetFilters: Map[String, ReplicationFilter], sourceFilter: ReplicationFilter, eventCompatibilityFilter: EventReplicationDecider): Props =
-    Props(new EventLog(id, targetFilters, sourceFilter, eventCompatibilityFilter))
+  case class AddDecider(sourceLogId: String, eventReplicationDecider: EventReplicationDecider)
+  case class RemoveDecider(sourceLogId: String)
+
+  def props(id: String): Props =
+    props(id, Map.empty, NoFilter)
+
+  def props(id: String, targetFilters: Map[String, ReplicationFilter], sourceFilter: ReplicationFilter): Props =
+    Props(new EventLog(id, targetFilters, sourceFilter))
 
   def encode(events: Seq[DecodedEvent])(implicit serialization: Serialization): Seq[EncodedEvent] =
     events.map(EventPayloadSerializer.encode)

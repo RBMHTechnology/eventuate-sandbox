@@ -4,7 +4,7 @@ import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.ReplicationD
 
 // TODO find better names
 trait EventReplicationDecider {
-  def decide(sourceLogId: String)(eventCompatibility: EventCompatibility): ReplicationDecision
+  def decide(eventCompatibility: EventCompatibility): ReplicationDecision
 }
 
 object EventReplicationDecider {
@@ -23,7 +23,7 @@ object EventReplicationDecider {
   }
 
   object StopOnIncompatibility extends EventReplicationDecider {
-    override def decide(sourceLogId: String)(eventCompatibility: EventCompatibility): ReplicationDecision =
+    override def decide(eventCompatibility: EventCompatibility): ReplicationDecision =
       eventCompatibility match {
         case Compatible(event) => Keep(event)
         case _ => Stop(eventCompatibility)
@@ -31,7 +31,7 @@ object EventReplicationDecider {
   }
 
   object StopOnUnserializableKeepOthers extends EventReplicationDecider {
-    override def decide(sourceLogId: String)(eventCompatibility: EventCompatibility): ReplicationDecision =
+    override def decide(eventCompatibility: EventCompatibility): ReplicationDecision =
       eventCompatibility match {
         case Compatible(event) => Keep(event)
         case MinorIncompatibility(event, _, _) => Keep(event)

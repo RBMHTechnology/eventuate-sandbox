@@ -5,7 +5,8 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
-import com.rbmhtechnology.eventuate.sandbox.EventReplicationDecider.StopOnUnserializableKeepOthers
+import com.rbmhtechnology.eventuate.sandbox.EventLog.AddDecider
+import com.rbmhtechnology.eventuate.sandbox.EventLog.RemoveDecider
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.typesafe.config._
@@ -23,8 +24,6 @@ class ReplicationEndpoint(
   logNames: Set[String],
   targetFilters: Map[String, ReplicationFilter],
   sourceFilters: Map[String, ReplicationFilter],
-  // TODO move to connect
-  eventCompatibilityFilter: EventReplicationDecider = StopOnUnserializableKeepOthers,
   config: Config = ConfigFactory.empty()) {
 
   import ReplicationEndpoint._
@@ -53,9 +52,15 @@ class ReplicationEndpoint(
 
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
+  def connect(remoteEndpoint: ReplicationEndpoint, eventReplicationDeciders: Map[String, EventReplicationDecider]): Future[String] =
+    connect(remoteEndpoint.connectionAcceptor, eventReplicationDeciders)
 
-  def connect(remoteAcceptor: ActorRef): Future[String] =
+  def connect(remoteAcceptor: ActorRef, eventReplicationDeciders: Map[String, EventReplicationDecider] = Map.empty): Future[String] = {
     remoteAcceptor.ask(GetReplicationSourceLogs(logNames))(settings.askTimeout).mapTo[GetReplicationSourceLogsSuccess].map { reply =>
+      eventReplicationDeciders.foreach { case (logName, decider) =>
+        eventLogs.get(logName).foreach(_ ! AddDecider(logId(reply.endpointId, logName), decider))
+      }
+      //TODO make sure deciders are added before replicators are started
       val replicators = reply.sourceLogs.map {
         case (logName, sourceLog) =>
           val sourceLogId = logId(reply.endpointId, logName)
@@ -65,9 +70,14 @@ class ReplicationEndpoint(
       addConnection(reply.endpointId, replicators.toSet)
       reply.endpointId
     }
+  }
 
-  def disconnect(remoteEndpointId: String): Unit =
+  def disconnect(remoteEndpointId: String): Unit = {
     removeConnection(remoteEndpointId).foreach(system.stop)
+    eventLogs.foreach { case (logName, eventLog) =>
+      eventLog ! RemoveDecider(logId(remoteEndpointId, logName))
+    }
+  }
 
   def terminate(): Future[Terminated] =
     system.terminate()
@@ -76,7 +86,7 @@ class ReplicationEndpoint(
     system.actorOf(Props(new ReplicationConnectionAcceptor(id, eventLogs)))
 
   private def createEventLog(logName: String): ActorRef =
-    system.actorOf(EventLog.props(logId(id, logName), targetFilters, sourceFilters.getOrElse(logName, NoFilter), eventCompatibilityFilter))
+    system.actorOf(EventLog.props(logId(id, logName), targetFilters, sourceFilters.getOrElse(logName, NoFilter)))
 
   private def createReplicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: String, targetLog: ActorRef): ActorRef =
     system.actorOf(Props(new Replicator(sourceLogId, sourceLog, targetLogId, targetLog)))
