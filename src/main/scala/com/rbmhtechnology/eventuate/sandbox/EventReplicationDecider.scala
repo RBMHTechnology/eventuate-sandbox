@@ -10,13 +10,12 @@ trait EventReplicationDecider {
 object EventReplicationDecider {
 
   trait ReplicationDecision
-  // TODO add DecodedEvent
-  case class Keep(event: EncodedEvent) extends ReplicationDecision
+  case class Keep(event: FullEvent) extends ReplicationDecision
   case class Stop(reason: EventCompatibility) extends ReplicationDecision
   case object Filter extends ReplicationDecision
 
   object ReplicationDecision {
-    def unwrapKeep(decision: ReplicationDecision): EncodedEvent = decision match {
+    def unwrapKeep(decision: ReplicationDecision): FullEvent = decision match {
       case Keep(event) => event
     }
     def replicationContinues(decision: ReplicationDecision): Boolean =

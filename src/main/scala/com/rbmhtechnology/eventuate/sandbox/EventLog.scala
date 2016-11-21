@@ -54,26 +54,32 @@ trait EventLogOps {
     progressStore.getOrElse(logId, 0L)
 
   def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events, (evt, snr) => evt.emitted(id, snr))
+    write[EncodedEvent](events, identity, (evt, snr) => evt.emitted(id, snr))
 
-  def replicationWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events.filter(causalityFilter(_versionVector).apply), (evt, snr) => evt.replicated(id, snr))
+  def replicationWrite(events: Seq[FullEvent]): Seq[FullEvent] =
+    write[FullEvent](
+      events.filter(ev => causalityFilter(_versionVector)(ev.encoded)),
+      _.encoded,
+      (evt, snr) => {
+        val encoded = evt.encoded.replicated(id, snr)
+        evt.copy(encoded, evt.decoded.copy(metadata = encoded.metadata))
+      })
 
   def progressWrite(progresses: Map[String, Long]): Unit =
     progressStore = progressStore ++ progresses
 
-  private def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
+  private def write[A](as: Seq[A], getEncoded: A => EncodedEvent, prepare: (A, Long) => A): Seq[A] = {
     var snr = _sequenceNr
     var cvv = _versionVector
     var log = eventStore
 
-    val written = events.map { event =>
+    val written = as.map { event =>
       snr = snr + 1L
 
       val prepared = prepare(event, snr)
 
-      cvv = cvv.merge(prepared.metadata.vectorTimestamp)
-      log = log :+ prepared
+      cvv = cvv.merge(getEncoded(prepared).metadata.vectorTimestamp)
+      log = log :+ getEncoded(prepared)
 
       prepared
     }
@@ -119,25 +125,25 @@ class EventLog(val id: String, val targetFilters: Map[String, ReplicationFilter]
       val decoded = encoded.zip(events).map { case (enc, dec) => dec.copy(enc.metadata) }
       sender() ! WriteSuccess(decoded)
       publish(decoded)
-    case ReplicationWrite(events, sourceLogId, progress) =>
-      val (continued, stopped) = split(events, sourceLogId)
+    case ReplicationWrite(encodedEvents, sourceLogId, progress) =>
+      val (continued, stopped) = split(encodedEvents, sourceLogId)
       val filtered = continued
         .filter(_ != Filter)
         .map(unwrapKeep)
 
-      val encoded = replicationWrite(filtered.toList)
+      val events = replicationWrite(filtered.toList)
       if(stopped.isEmpty) progressWrite(Map(sourceLogId -> progress))
       val response =
         failureIfStoppedOnFirst(continued ++ stopped)
-        .getOrElse(ReplicationWriteSuccess(encoded, sourceLogId, progress, versionVector))
+        .getOrElse(ReplicationWriteSuccess(events.map(_.encoded), sourceLogId, progress, versionVector))
       sender() ! response
-      publish(decode(encoded))
+      publish(events.map(_.decoded))
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
   }
 
-  private def split(events: Seq[EncodedEvent], sourceLogId: String): (Stream[ReplicationDecision], Stream[ReplicationDecision]) = {
-    Stream(events: _*)
+  private def split(encodedEvents: Seq[EncodedEvent], sourceLogId: String): (Stream[ReplicationDecision], Stream[ReplicationDecision]) = {
+    Stream(encodedEvents: _*)
       .map(eventCompatibility)
       .map(eventCompatibilityFilter.decide(sourceLogId))
       .span(replicationContinues)
