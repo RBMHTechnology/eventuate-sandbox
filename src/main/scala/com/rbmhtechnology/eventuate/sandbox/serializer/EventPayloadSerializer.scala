@@ -1,7 +1,6 @@
 package com.rbmhtechnology.eventuate.sandbox.serializer
 
-import akka.actor.ActorSystem
-import akka.serialization.SerializationExtension
+import akka.serialization.Serialization
 import akka.serialization.Serializer
 import akka.serialization.SerializerWithStringManifest
 import com.rbmhtechnology.eventuate.sandbox.DecodedEvent
@@ -17,18 +16,18 @@ abstract class EventPayloadSerializer extends SerializerWithStringManifest {
 }
 
 object EventPayloadSerializer {
-  def encode(event: DecodedEvent)(implicit system: ActorSystem): EncodedEvent =
+  def encode(event: DecodedEvent)(implicit serialization: Serialization): EncodedEvent =
     EncodedEvent(event.metadata, serializePayload(event.payload))
 
-  def decode(event: EncodedEvent)(implicit system: ActorSystem): Try[DecodedEvent] =
+  def decode(event: EncodedEvent)(implicit serialization: Serialization): Try[DecodedEvent] =
     deserializePayload(event.payload)
       .map(payload => DecodedEvent(event.metadata, payload))
 
-  def isDeserializable(event: EncodedEvent)(implicit system: ActorSystem): Boolean =
+  def isDeserializable(event: EncodedEvent)(implicit serialization: Serialization): Boolean =
     deserializePayload(event.payload).isSuccess
 
-  private def serializePayload(payload: AnyRef)(implicit system: ActorSystem): EventBytes = {
-    val serializer = SerializationExtension(system).findSerializerFor(payload)
+  private def serializePayload(payload: AnyRef)(implicit serialization: Serialization): EventBytes = {
+    val serializer = serialization.findSerializerFor(payload)
     EventBytes(serializer.toBinary(payload), serializer.identifier, eventManifest(serializer, payload))
   }
 
@@ -51,14 +50,14 @@ object EventPayloadSerializer {
       case _ => None
     }
 
-  private def deserializePayload(payload: EventBytes)(implicit system: ActorSystem): Try[AnyRef] =
+  private def deserializePayload(payload: EventBytes)(implicit serialization: Serialization): Try[AnyRef] =
     if (payload.manifest.isStringManifest) {
-      SerializationExtension(system).deserialize(
+      serialization.deserialize(
         payload.bytes,
         payload.serializerId,
         payload.manifest.schema)
     } else {
       val manifestClass = Class.forName(payload.manifest.schema)
-      SerializationExtension(system).deserialize(payload.bytes, manifestClass).map(_.asInstanceOf[AnyRef])
+      serialization.deserialize(payload.bytes, manifestClass).map(_.asInstanceOf[AnyRef])
     }
 }

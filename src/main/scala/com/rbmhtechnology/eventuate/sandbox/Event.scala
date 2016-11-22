@@ -34,3 +34,5 @@ case class EncodedEvent(metadata: EventMetadata, payload: EventBytes) extends Du
       localSequenceNr = localSequenceNr))
   }
 }
+
+case class FullEvent(encoded: EncodedEvent, decoded: DecodedEvent)

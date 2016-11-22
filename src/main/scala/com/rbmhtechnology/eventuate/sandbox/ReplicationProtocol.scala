@@ -16,4 +16,5 @@ object ReplicationProtocol {
 
   case class ReplicationWrite(events: Seq[EncodedEvent], sourceLogId: String, progress: Long)
   case class ReplicationWriteSuccess(events: Seq[EncodedEvent], sourceLogId: String, progress: Long, targetVersionVector: VectorTime)
+  case class ReplicationWriteFailure(cause: Throwable)
 }
