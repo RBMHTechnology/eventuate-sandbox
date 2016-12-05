@@ -9,71 +9,72 @@ import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import scala.collection.immutable.Seq
 
 trait EventLogOps {
-  private var _sequenceNr: Long = 0L
-  private var _versionVector: VectorTime = VectorTime.Zero
-  private var _deletionVector: VectorTime = VectorTime.Zero
-
-  var eventStore: Vector[EncodedEvent] = Vector.empty
-  private var progressStore: Map[String, Long] = Map.empty
+  private var _progressStore: Map[String, Long] = Map.empty
+  private var _eventStore: Vector[EncodedEvent] = Vector.empty
+  private var _vectorClock: VectorClock = _
 
   def id: String
-
   def sourceFilter: ReplicationFilter
   def targetFilter(targetLogId: String): ReplicationFilter
 
-  def sequenceNr: Long =
-    _sequenceNr
-
-  def versionVector: VectorTime =
-    _versionVector
-
-  def read(fromSquenceNr: Long): Seq[EncodedEvent] =
-    eventStore.drop(fromSquenceNr.toInt - 1)
-
-  def causalityFilter(versionVector: VectorTime): ReplicationFilter = new ReplicationFilter {
-    override def apply(event: EncodedEvent): Boolean = !event.before(versionVector)
-  }
-
-  def replicationReadFilter(targetLogId: String, targetVersionVector: VectorTime): ReplicationFilter =
-    causalityFilter(targetVersionVector) and targetFilter(targetLogId) and sourceFilter
-
-  def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): Seq[EncodedEvent] =
-    read(fromSequenceNr).filter(replicationReadFilter(targetLogId, targetVersionVector).apply).take(num)
+  def vectorClock: VectorClock =
+    _vectorClock
 
   def progressRead(logId: String): Long =
-    progressStore.getOrElse(logId, 0L)
+    _progressStore.getOrElse(logId, 0L)
 
-  def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events, (evt, snr) => evt.emitted(id, snr))
+  def replayRead(fromSquenceNr: Long): Seq[EncodedEvent] =
+    _eventStore.drop(fromSquenceNr.toInt - 1)
 
-  def replicationWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events.filter(causalityFilter(_versionVector).apply), (evt, snr) => evt.replicated(id, snr))
+  def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVectorTime: VectorTime): Seq[EncodedEvent] =
+    replayRead(fromSequenceNr).filter(replicationReadFilter(targetLogId, targetVectorTime).apply).take(num)
 
   def progressWrite(sourceLogId: String, progress: Long): Unit =
-    progressStore = progressStore.updated(sourceLogId, progress)
+    _progressStore = _progressStore.updated(sourceLogId, progress)
 
-  private def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
-    var snr = _sequenceNr
-    var cvv = _versionVector
-    var log = eventStore
-
-    val written = events.map { event =>
-      snr = snr + 1L
-
-      val prepared = prepare(event, snr)
-
-      cvv = cvv.merge(prepared.metadata.vectorTimestamp)
-      log = log :+ prepared
-
-      prepared
+  def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
+    write(events) {
+      case (vcl, evt) =>
+        val vcl2 = vcl.incrementLocal
+        val evt2 = evt.emitted(id, vcl2.currentLocalTime)
+        (vcl2, evt2)
     }
 
-    _sequenceNr = snr
-    _versionVector = cvv
-    eventStore = log
+  def replicationWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
+    write(events.filter(causalityFilter(vectorClock.currentTime).apply)) {
+      case (vcl, evt) =>
+        val vcl2 = vcl.update(evt.metadata.vectorTimestamp)
+        val evt2 = evt.replicated(id, vcl2.currentLocalTime)
+        (vcl2, evt2)
+    }
 
-    written
+  private def write(events: Seq[EncodedEvent])(prepare: (VectorClock, EncodedEvent) => (VectorClock, EncodedEvent)): Seq[EncodedEvent] = {
+    var res: Vector[EncodedEvent] = Vector.empty
+    var log = _eventStore
+    var vcl = _vectorClock
+
+    events.foreach { evt =>
+      val (c, e) = prepare(vcl, evt)
+
+      res = res :+ e
+      log = log :+ e
+      vcl = c
+    }
+
+    _vectorClock = vcl
+    _eventStore = log
+
+    res
   }
+
+  private def replicationReadFilter(targetLogId: String, targetVectorTime: VectorTime): ReplicationFilter =
+    causalityFilter(targetVectorTime) and targetFilter(targetLogId) and sourceFilter
+
+  private def causalityFilter(vectorTime: VectorTime): ReplicationFilter = new ReplicationFilter {
+    override def apply(event: EncodedEvent): Boolean = !event.before(vectorTime)}
+
+  private[eventuate] def initVectorClock(currentTime: VectorTime): Unit =
+    _vectorClock = VectorClock(currentTime, id)
 }
 
 trait EventSubscribers {
@@ -100,7 +101,7 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
     case Subscribe(subscriber) =>
       subscribe(subscriber)
     case Read(from) =>
-      val encoded = read(from)
+      val encoded = replayRead(from)
       sender() ! ReadSuccess(decode(encoded))
     case ReplicationRead(from, num, tlid, tvv) =>
       val encoded = replicationRead(from, num, tlid, tvv)
@@ -113,16 +114,19 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
     case ReplicationWrite(events, sourceLogId, progress) =>
       val encoded = replicationWrite(events); progressWrite(sourceLogId, progress)
       val decoded = decode(encoded)
-      sender() ! ReplicationWriteSuccess(encoded, sourceLogId, progress, versionVector)
+      sender() ! ReplicationWriteSuccess(encoded, sourceLogId, progress, vectorClock.currentTime)
       publish(decoded)
-    case GetReplicationProgressAndVersionVector(logId) =>
-      sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
+    case GetReplicationProgressAndVectorTime(logId) =>
+      sender() ! GetReplicationProgressAndVectorTimeSuccess(progressRead(logId), vectorClock.currentTime)
     case AddTargetFilter(logId, filter) =>
       targetFilters = targetFilters.updated(logId, filter)
   }
 
-  def targetFilter(logId: String): ReplicationFilter =
+  override def targetFilter(logId: String): ReplicationFilter =
     targetFilters.getOrElse(logId, NoFilter)
+
+  override def preStart(): Unit =
+    initVectorClock(VectorTime.Zero)
 }
 
 object EventLog {

@@ -127,9 +127,9 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
   }
 
   val fetching: Receive = {
-    case GetReplicationProgressAndVersionVectorSuccess(progress, targetVersionVector) =>
+    case GetReplicationProgressAndVectorTimeSuccess(progress, targetVectorTime) =>
       context.become(reading)
-      read(progress + 1L, targetVersionVector)
+      read(progress + 1L, targetVectorTime)
   }
 
   val reading: Receive = {
@@ -142,9 +142,9 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
   }
 
   val writing: Receive = {
-    case ReplicationWriteSuccess(_, _, progress, targetVersionVector) =>
+    case ReplicationWriteSuccess(_, _, progress, targetVectorTime) =>
       context.become(reading)
-      read(progress + 1L, targetVersionVector)
+      read(progress + 1L, targetVectorTime)
   }
 
   override def receive = fetching
@@ -153,10 +153,10 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
     schedule = Some(scheduler.scheduleOnce(settings.retryDelay, self, Continue))
 
   private def fetch(): Unit =
-    targetLog.ask(GetReplicationProgressAndVersionVector(sourceLogId))(settings.askTimeout).pipeTo(self)
+    targetLog.ask(GetReplicationProgressAndVectorTime(sourceLogId))(settings.askTimeout).pipeTo(self)
 
-  private def read(fromSequenceNr: Long, targetVersionVector: VectorTime): Unit =
-    sourceLog.ask(ReplicationRead(fromSequenceNr, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
+  private def read(fromSequenceNr: Long, targetVectorTime: VectorTime): Unit =
+    sourceLog.ask(ReplicationRead(fromSequenceNr, settings.batchSize, targetLogId, targetVectorTime))(settings.askTimeout).pipeTo(self)
 
   private def write(events: Seq[EncodedEvent], progress: Long): Unit =
     targetLog.ask(ReplicationWrite(events, sourceLogId, progress))(settings.askTimeout).pipeTo(self)

@@ -87,11 +87,11 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
         DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
 
       whenReady(log.ask(ReplicationWrite(encode(replicated), LogId2, 2L))) {
-        case ReplicationWriteSuccess(events, sourceLogId, progress, versionVector) =>
+        case ReplicationWriteSuccess(events, sourceLogId, progress, targetVectorTime) =>
           decode(events) should be(expected)
           sourceLogId should be(LogId2)
           progress should be(2L)
-          versionVector should be(VectorTime(LogId2 -> 2L))
+          targetVectorTime should be(VectorTime(LogId1 -> 2L, LogId2 -> 2L))
       }
       whenReady(log.ask(ReplicationRead(1L, settings.batchSize, LogId2, VectorTime.Zero))) {
         case ReplicationReadSuccess(events, progress) =>
@@ -147,6 +147,21 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
       val probe = TestProbe()
 
       log ! Subscribe(probe.ref)
+      log ? ReplicationWrite(encode(replicated), LogId2, 2L)
+
+      probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"))
+      probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
+    }
+    "support idempotent ReplicationWrites" in {
+      val replicated = Seq(
+        DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId2, 1L, VectorTime(LogId2 -> 1L)), "a"),
+        DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId2, 2L, VectorTime(LogId2 -> 2L)), "b"))
+
+      val probe = TestProbe()
+
+      log ! Subscribe(probe.ref)
+
+      log ? ReplicationWrite(encode(replicated.take(1)), LogId2, 1L)
       log ? ReplicationWrite(encode(replicated), LogId2, 2L)
 
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"))
