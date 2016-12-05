@@ -49,8 +49,8 @@ trait EventLogOps {
   def replicationWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
     write(events.filter(causalityFilter(_versionVector).apply), (evt, snr) => evt.replicated(id, snr))
 
-  def progressWrite(progresses: Map[String, Long]): Unit =
-    progressStore = progressStore ++ progresses
+  def progressWrite(sourceLogId: String, progress: Long): Unit =
+    progressStore = progressStore.updated(sourceLogId, progress)
 
   private def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
     var snr = _sequenceNr
@@ -111,7 +111,7 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
       sender() ! WriteSuccess(decoded)
       publish(decoded)
     case ReplicationWrite(events, sourceLogId, progress) =>
-      val encoded = replicationWrite(events); progressWrite(Map(sourceLogId -> progress))
+      val encoded = replicationWrite(events); progressWrite(sourceLogId, progress)
       val decoded = decode(encoded)
       sender() ! ReplicationWriteSuccess(encoded, sourceLogId, progress, versionVector)
       publish(decoded)
