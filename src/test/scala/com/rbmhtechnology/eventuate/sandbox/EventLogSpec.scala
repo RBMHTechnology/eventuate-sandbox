@@ -4,13 +4,13 @@ import akka.actor._
 import akka.pattern.ask
 import akka.testkit._
 import akka.util.Timeout
+
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
-import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
+
 import org.scalatest._
 import org.scalatest.concurrent.ScalaFutures
-import org.scalatest.time.Millis
-import org.scalatest.time.Span
+import org.scalatest.time.{Millis, Span}
 
 import scala.collection.immutable.Seq
 
@@ -22,12 +22,12 @@ object EventLogSpec {
   val LogId2 = "L2"
   val LogId3 = "L3"
 
-  class ExcludePayload(payload: String)(implicit system: ActorSystem) extends ReplicationFilter {
+  class ExcludePayload(payload: String) extends ReplicationFilter {
     override def apply(event: EncodedEvent): Boolean =
-      EventPayloadSerializer.decode(event).get.payload != payload
+      event.decode.payload != payload
   }
 
-  def excludePayload(payload: String)(implicit system: ActorSystem): ReplicationFilter =
+  def excludePayload(payload: String): ReplicationFilter =
     new ExcludePayload(payload)
 }
 
