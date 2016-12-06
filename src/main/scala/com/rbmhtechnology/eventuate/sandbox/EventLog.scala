@@ -100,16 +100,16 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
   override def receive = {
     case Subscribe(subscriber) =>
       subscribe(subscriber)
-    case Read(from) =>
+    case ReplayRead(from) =>
       val encoded = replayRead(from)
-      sender() ! ReadSuccess(decode(encoded))
+      sender() ! ReplayReadSuccess(decode(encoded))
     case ReplicationRead(from, num, tlid, tvv) =>
       val encoded = replicationRead(from, num, tlid, tvv)
       sender() ! ReplicationReadSuccess(encoded, encoded.lastOption.map(_.metadata.localSequenceNr).getOrElse(from))
-    case Write(events) =>
+    case EmissionWrite(events) =>
       val encoded = emissionWrite(encode(events))
       val decoded = encoded.zip(events).map { case (enc, dec) => dec.copy(enc.metadata) }
-      sender() ! WriteSuccess(decoded)
+      sender() ! EmissionWriteSuccess(decoded)
       publish(decoded)
     case ReplicationWrite(events, sourceLogId, progress) =>
       val encoded = replicationWrite(events); progressWrite(sourceLogId, progress)

@@ -62,16 +62,16 @@ class ReplicationEndpointSpec extends TestKit(ActorSystem("test")) with WordSpec
       endpoint1.connect(endpoint2)
       endpoint2.connect(endpoint1)
 
-      log1 ? Write(List(DecodedEvent(EmitterId1, "a")))
-      log1 ? Write(List(DecodedEvent(EmitterId1, "b")))
+      log1 ? EmissionWrite(List(DecodedEvent(EmitterId1, "a")))
+      log1 ? EmissionWrite(List(DecodedEvent(EmitterId1, "b")))
 
       probe1.expectMsg(DecodedEvent(EventMetadata(EmitterId1, log1Id, log1Id, 1L, VectorTime(log1Id -> 1L)), "a"))
       probe1.expectMsg(DecodedEvent(EventMetadata(EmitterId1, log1Id, log1Id, 2L, VectorTime(log1Id -> 2L)), "b"))
       probe2.expectMsg(DecodedEvent(EventMetadata(EmitterId1, log1Id, log2Id, 1L, VectorTime(log1Id -> 1L)), "a"))
       probe2.expectMsg(DecodedEvent(EventMetadata(EmitterId1, log1Id, log2Id, 2L, VectorTime(log1Id -> 2L)), "b"))
 
-      log2 ? Write(List(DecodedEvent(EmitterId2, "x")))
-      log2 ? Write(List(DecodedEvent(EmitterId2, "y")))
+      log2 ? EmissionWrite(List(DecodedEvent(EmitterId2, "x")))
+      log2 ? EmissionWrite(List(DecodedEvent(EmitterId2, "y")))
 
       probe2.expectMsg(DecodedEvent(EventMetadata(EmitterId2, log2Id, log2Id, 3L, VectorTime(log2Id -> 3L)), "x"))
       probe2.expectMsg(DecodedEvent(EventMetadata(EmitterId2, log2Id, log2Id, 4L, VectorTime(log2Id -> 4L)), "y"))

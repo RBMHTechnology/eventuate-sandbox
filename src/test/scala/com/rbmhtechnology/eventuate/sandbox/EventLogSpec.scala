@@ -67,14 +67,14 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
         DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 1L, VectorTime(LogId1 -> 1L)), "a"),
         DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 2L, VectorTime(LogId1 -> 2L)), "b"))
 
-      whenReady(log.ask(Write(emitted))) {
-        case WriteSuccess(events) => events should be(expected)
+      whenReady(log.ask(EmissionWrite(emitted))) {
+        case EmissionWriteSuccess(events) => events should be(expected)
       }
-      whenReady(log.ask(Read(1L))) {
-        case ReadSuccess(events) => events should be(expected)
+      whenReady(log.ask(ReplayRead(1L))) {
+        case ReplayReadSuccess(events) => events should be(expected)
       }
-      whenReady(log.ask(Read(2L))) {
-        case ReadSuccess(events) => events should be(expected.tail)
+      whenReady(log.ask(ReplayRead(2L))) {
+        case ReplayReadSuccess(events) => events should be(expected.tail)
       }
     }
     "process ReplicationWrite and ReplicationRead" in {
@@ -134,7 +134,7 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
       val probe = TestProbe()
 
       log ! Subscribe(probe.ref)
-      log ? Write(emitted)
+      log ? EmissionWrite(emitted)
 
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 1L, VectorTime(LogId1 -> 1L)), "a"))
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId1, LogId1, LogId1, 2L, VectorTime(LogId1 -> 2L)), "b"))
