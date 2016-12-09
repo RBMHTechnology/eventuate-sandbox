@@ -3,7 +3,9 @@ package com.rbmhtechnology.eventuate.sandbox
 import akka.actor._
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
+import com.rbmhtechnology.eventuate.sandbox.ReplicationProcessor.ReplicationProcessResult
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
+import com.rbmhtechnology.eventuate.sandbox.ReplicationStopper.StopAfter
 import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 
 import scala.collection.immutable.Seq
@@ -37,8 +39,8 @@ trait EventLogOps {
   def replicationReadFilter(targetLogId: String, targetVersionVector: VectorTime): ReplicationFilter =
     causalityFilter(targetVersionVector) and targetFilter(targetLogId) and sourceFilter
 
-  def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): Seq[EncodedEvent] =
-    read(fromSequenceNr).filter(replicationReadFilter(targetLogId, targetVersionVector).apply).take(num)
+  def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
+    new ReplicationProcessor(replicationReadFilter(targetLogId, targetVersionVector), new StopAfter(num)).apply(read(fromSequenceNr))
 
   def progressRead(logId: String): Long =
     progressStore.getOrElse(logId, 0L)
@@ -46,8 +48,11 @@ trait EventLogOps {
   def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
     write(events, (evt, snr) => evt.emitted(id, snr))
 
-  def replicationWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events.filter(causalityFilter(_versionVector).apply), (evt, snr) => evt.replicated(id, snr))
+  def replicationWrite(events: Seq[EncodedEvent]): ReplicationProcessResult = {
+    new ReplicationProcessor(causalityFilter(_versionVector)).apply(events).right.map {
+      case (filtered, progress) => (write(filtered, (evt, snr) => evt.replicated(id, snr)), progress)
+    }
+  }
 
   def progressWrite(progresses: Map[String, Long]): Unit =
     progressStore = progressStore ++ progresses
@@ -104,18 +109,27 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
       val encoded = read(from)
       sender() ! ReadSuccess(decode(encoded))
     case ReplicationRead(from, num, tlid, tvv) =>
-      val encoded = replicationRead(from, num, tlid, tvv)
-      sender() ! ReplicationReadSuccess(encoded, encoded.lastOption.map(_.metadata.localSequenceNr).getOrElse(from))
+      replicationRead(from, num, tlid, tvv) match {
+        case Right((processedEvents, _)) =>
+          sender() ! ReplicationReadSuccess(processedEvents, processedEvents.lastOption.map(_.metadata.localSequenceNr).getOrElse(from))
+        case Left(reason) =>
+          sender() ! ReplicationReadFailure(new ReplicationStoppedException(reason))
+      }
     case Write(events) =>
       val encoded = emissionWrite(encode(events))
       val decoded = encoded.zip(events).map { case (enc, dec) => dec.copy(enc.metadata) }
       sender() ! WriteSuccess(decoded)
       publish(decoded)
     case ReplicationWrite(events, sourceLogId, progress) =>
-      val encoded = replicationWrite(events); progressWrite(Map(sourceLogId -> progress))
-      val decoded = decode(encoded)
-      sender() ! ReplicationWriteSuccess(encoded, sourceLogId, progress, versionVector)
-      publish(decoded)
+      replicationWrite(events) match {
+        case Right((processedEvents, updatedProgress)) =>
+          progressWrite(Map(sourceLogId -> updatedProgress.getOrElse(progress)))
+          val decoded = decode(processedEvents)
+          sender() ! ReplicationWriteSuccess(processedEvents, sourceLogId, progress, versionVector)
+          publish(decoded)
+        case Left(reason) =>
+          sender() ! ReplicationWriteFailure(new ReplicationStoppedException(reason))
+      }
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
     case AddTargetFilter(logId, filter) =>
@@ -138,4 +152,7 @@ object EventLog {
 
   def decode(events: Seq[EncodedEvent])(implicit system: ActorSystem): Seq[DecodedEvent] =
     events.map(e => EventPayloadSerializer.decode(e).get)
+
+  class ReplicationStoppedException(reason: StopReason)
+    extends IllegalStateException(s"Replication stopped: $reason")
 }
