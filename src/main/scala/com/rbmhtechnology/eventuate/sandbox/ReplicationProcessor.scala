@@ -1,38 +1,35 @@
 package com.rbmhtechnology.eventuate.sandbox
 
-import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
+import com.rbmhtechnology.eventuate.sandbox.ReplicationDecider.Block
+import com.rbmhtechnology.eventuate.sandbox.ReplicationDecider.Filter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProcessor.ReplicationProcessResult
-import com.rbmhtechnology.eventuate.sandbox.ReplicationStopper.NoStopper
 
+import scala.annotation.tailrec
 import scala.collection.immutable.Seq
 
 object ReplicationProcessor {
-  type ReplicationProcessResult = Either[StopReason, (Seq[EncodedEvent], Option[Long])]
+  type ReplicationProcessResult = Either[BlockReason, (Seq[EncodedEvent], Long)]
 }
 
-class ReplicationProcessor(replicationFilter: ReplicationFilter = NoFilter, replicationStopper: ReplicationStopper = NoStopper) {
+case class ReplicationProcessor(replicationDecider: ReplicationDecider) {
 
-  def apply(events: Seq[EncodedEvent]): ReplicationProcessResult = {
-    var stopReason: Option[StopReason] = None
-    var noEventsFiltered = true
-    var lastProcessed: Long = 0
-    // TODO replace filter by tail recursive function
-    val filteredEvents = events.filter { event =>
-      stopReason.isEmpty &&
-        {
-          val passed = replicationFilter(event)
-          if(!passed) noEventsFiltered = false
-          lastProcessed = event.metadata.localSequenceNr
-          passed
-        } && {
-        stopReason = replicationStopper(event)
-        stopReason.isEmpty
-      }
+  def apply(events: Seq[EncodedEvent], progress: Long): ReplicationProcessResult = {
+    var lastProgress: Long = 0
+
+    @tailrec
+    def go(in: Seq[EncodedEvent], out: Vector[EncodedEvent]): ReplicationProcessResult = in match {
+      case seq if seq.isEmpty =>
+        Right(out, progress)
+      case seq =>
+        replicationDecider(seq.head) match {
+          case Block(reason) =>
+            Either.cond(lastProgress > 0, (out, lastProgress), reason)
+          case decision =>
+            lastProgress = seq.head.metadata.localSequenceNr
+            go(seq.tail, if(decision == Filter) out else out :+ seq.head)
+        }
     }
-    stopReason match {
-      case None => Right(filteredEvents, None)
-      case Some(reason) if noEventsFiltered && filteredEvents == Nil => Left(reason)
-      case _ => Right(filteredEvents, Some(lastProcessed))
-    }
+
+    go(events, Vector.empty)
   }
 }

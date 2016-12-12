@@ -5,6 +5,9 @@ import akka.actor.ActorRef
 import scala.collection.immutable.Seq
 
 object ReplicationProtocol {
+  case class AddEventCompatibilityDecider(sourceLogId: String, decider: ReplicationDecider)
+  case class RemoveEventCompatibilityDecider(sourceLogId: String)
+
   case class AddTargetFilter(targetLogId: String, filter: ReplicationFilter)
 
   case class GetReplicationSourceLogs(logNames: Set[String])
