@@ -8,12 +8,12 @@ import com.rbmhtechnology.eventuate.sandbox.DecodedEvent
 import com.rbmhtechnology.eventuate.sandbox.EncodedEvent
 import com.rbmhtechnology.eventuate.sandbox.EventBytes
 import com.rbmhtechnology.eventuate.sandbox.EventManifest
-import com.rbmhtechnology.eventuate.sandbox.EventVersion
+import com.rbmhtechnology.eventuate.sandbox.PayloadVersion
 
 import scala.util.Try
 
 abstract class EventPayloadSerializer extends SerializerWithStringManifest {
-  def eventVersion(schema: String): EventVersion
+  def payloadVersion(schema: String): PayloadVersion
 }
 
 object EventPayloadSerializer {
@@ -34,7 +34,7 @@ object EventPayloadSerializer {
 
   private def eventManifest(serializer: Serializer, payload: AnyRef): EventManifest = {
     val schema = eventSchema(serializer, payload)
-    EventManifest(schema, serializer.isInstanceOf[SerializerWithStringManifest], eventVersion(serializer, schema))
+    EventManifest(schema, serializer.isInstanceOf[SerializerWithStringManifest], payloadVersion(serializer, schema))
   }
 
   private def eventSchema(serializer: Serializer, payload: AnyRef): String =
@@ -45,9 +45,9 @@ object EventPayloadSerializer {
         payload.getClass.getName
     }
 
-  private def eventVersion(serializer: Serializer, schema: String): Option[EventVersion] =
+  private def payloadVersion(serializer: Serializer, schema: String): Option[PayloadVersion] =
     serializer match {
-      case payloadSerializer: EventPayloadSerializer => Some(payloadSerializer.eventVersion(schema))
+      case payloadSerializer: EventPayloadSerializer => Some(payloadSerializer.payloadVersion(schema))
       case _ => None
     }
 

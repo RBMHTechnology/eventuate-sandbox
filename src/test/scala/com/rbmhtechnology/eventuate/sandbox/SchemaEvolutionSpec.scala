@@ -71,17 +71,17 @@ object SchemaEvolutionSpec {
   }
 
   case class TestSerializer1(system: ExtendedActorSystem) extends TestSerializer {
-    override def eventVersion(schema: String): EventVersion =
+    override def payloadVersion(schema: String): PayloadVersion =
       schema match {
-        case CompatibleEventManifest => EventVersion(1,1)
-        case MinorIncompatibleEventManifest => EventVersion(1,2)
-        case MajorIncompatibleEventManifest => EventVersion(2,1)
+        case CompatibleEventManifest => PayloadVersion(1,1)
+        case MinorIncompatibleEventManifest => PayloadVersion(1,2)
+        case MajorIncompatibleEventManifest => PayloadVersion(2,1)
       }
   }
 
   case class TestSerializer2(system: ExtendedActorSystem) extends TestSerializer {
-    override def eventVersion(schema: String) =
-      EventVersion(1,1)
+    override def payloadVersion(schema: String) =
+      PayloadVersion(1,1)
   }
 
   def stopOnUnexpectedFilterMajorContinueOnMinor(implicit system: ActorSystem): ReplicationDecider =
