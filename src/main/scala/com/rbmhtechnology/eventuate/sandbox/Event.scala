@@ -1,8 +1,8 @@
 package com.rbmhtechnology.eventuate.sandbox
 
 case class EventMetadata(emitterId: String, emitterLogId: String, localLogId: String, localSequenceNr: Long, vectorTimestamp: VectorTime)
-case class EventVersion(majorVersion: Int, minorVersion: Int)
-case class EventManifest(schema: String, isStringManifest: Boolean, eventVersion: Option[EventVersion])
+case class PayloadVersion(majorVersion: Int, minorVersion: Int)
+case class EventManifest(schema: String, isStringManifest: Boolean, payloadVersion: Option[PayloadVersion])
 case class EventBytes(bytes: Array[Byte], serializerId: Int, manifest: EventManifest)
 
 sealed trait DurableEvent {

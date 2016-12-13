@@ -5,7 +5,7 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
-
+import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.IncompatibilityReason
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.typesafe.config._
@@ -54,8 +54,15 @@ class ReplicationEndpoint(
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
 
-  def connect(remoteAcceptor: ActorRef): Future[String] =
+  def connect(remoteEndpoint: ReplicationEndpoint, eventCompatibilityDeciders: Map[String, ReplicationDecider]): Future[String] =
+    connect(remoteEndpoint.connectionAcceptor, eventCompatibilityDeciders)
+
+  def connect(remoteAcceptor: ActorRef, eventCompatibilityDeciders: Map[String, ReplicationDecider] = Map.empty): Future[String] =
     remoteAcceptor.ask(GetReplicationSourceLogs(logNames))(settings.askTimeout).mapTo[GetReplicationSourceLogsSuccess].map { reply =>
+      eventCompatibilityDeciders.foreach { case (logName, processor) =>
+        eventLogs.get(logName).foreach(_ ! AddEventCompatibilityDecider(logId(reply.endpointId, logName), processor))
+      }
+      //TODO make sure processors are added before replicators are started
       val replicators = reply.sourceLogs.map {
         case (logName, sourceLog) =>
           val sourceLogId = logId(reply.endpointId, logName)
@@ -66,8 +73,12 @@ class ReplicationEndpoint(
       reply.endpointId
     }
 
-  def disconnect(remoteEndpointId: String): Unit =
+  def disconnect(remoteEndpointId: String): Unit = {
     removeConnection(remoteEndpointId).foreach(system.stop)
+    eventLogs.foreach { case (logName, eventLog) =>
+      eventLog ! RemoveEventCompatibilityDecider(logId(remoteEndpointId, logName))
+    }
+  }
 
   def terminate(): Future[Terminated] =
     system.terminate()
