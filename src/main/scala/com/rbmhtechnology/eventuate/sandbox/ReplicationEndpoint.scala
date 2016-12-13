@@ -152,6 +152,9 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
     case ReplicationReadSuccess(events, progress) =>
       context.become(writing)
       write(events, progress)
+    case ReplicationReadFailure(cause) =>
+      context.become(idle)
+      scheduleRead()
   }
 
   val writing: Receive = {
