@@ -65,14 +65,14 @@ object EventCompatibility {
         eventCompatibility(event).map(decider).getOrElse(Continue)
     }
 
-  case class BlockOnIncompatibility(compatibility: IncompatibilityReason) extends BlockReason
+  case class Incompatible(compatibility: IncompatibilityReason) extends BlockReason
 
   def stopOnIncompatibility(implicit system: ActorSystem) = eventCompatibilityDecider {
-    incompatibility => Block(BlockOnIncompatibility(incompatibility))
+    incompatibility => Block(Incompatible(incompatibility))
   }
 
   def stopOnUnserializableKeepOthers(implicit system: ActorSystem) = eventCompatibilityDecider {
     case _: MinorIncompatibility | _: NoRemotePayloadVersion | _: NoLocalPayloadVersion => Continue
-    case incompatibility => Block(BlockOnIncompatibility(incompatibility))
+    case incompatibility => Block(Incompatible(incompatibility))
   }
 }

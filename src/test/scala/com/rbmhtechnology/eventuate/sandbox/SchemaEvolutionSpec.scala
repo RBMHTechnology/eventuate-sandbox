@@ -4,7 +4,7 @@ import akka.actor.ActorRef
 import akka.actor.ActorSystem
 import akka.actor.ExtendedActorSystem
 import akka.testkit.TestProbe
-import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.BlockOnIncompatibility
+import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.Incompatible
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.MajorIncompatibility
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.MinorIncompatibility
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.eventCompatibilityDecider
@@ -88,7 +88,7 @@ object SchemaEvolutionSpec {
     eventCompatibilityDecider {
       case _: MajorIncompatibility => Filter
       case _: MinorIncompatibility => Continue
-      case incompatibility => Block(BlockOnIncompatibility(incompatibility))
+      case incompatibility => Block(Incompatible(incompatibility))
     }
 
   def payloadEquals(payload: AnyRef): PartialFunction[Any, Any] = {
@@ -108,8 +108,8 @@ class SchemaEvolutionSpec extends WordSpec with Matchers with BeforeAndAfterEach
   private var log2: ActorRef = _
 
   override protected def beforeEach(): Unit = {
-    endpoint1 = new ReplicationEndpoint(EndpointId1, Set(LogName), Map(), serializerConfig(classOf[TestSerializer1]))
-    endpoint2 = new ReplicationEndpoint(EndpointId2, Set(LogName), Map(), serializerConfig(classOf[TestSerializer2]))
+    endpoint1 = new ReplicationEndpoint(EndpointId1, Set(LogName), config = serializerConfig(classOf[TestSerializer1]))
+    endpoint2 = new ReplicationEndpoint(EndpointId2, Set(LogName), config = serializerConfig(classOf[TestSerializer2]))
 
     probe1 = TestProbe()(endpoint1.system)
     probe2 = TestProbe()(endpoint2.system)

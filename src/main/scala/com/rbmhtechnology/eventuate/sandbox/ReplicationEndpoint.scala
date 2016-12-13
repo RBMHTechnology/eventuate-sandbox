@@ -5,7 +5,6 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
-import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.IncompatibilityReason
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.typesafe.config._
@@ -50,6 +49,9 @@ class ReplicationEndpoint(
 
   def addTargetFilter(targetEndpointId: String, targetLogName: String, filter: ReplicationFilter): Unit =
     eventLogs(targetLogName) ! AddTargetFilter(logId(targetEndpointId, targetLogName), filter)
+
+  def addRedundantFilterConfig(targetEndpointId: String, targetLogName: String, redundantlyConnectedEndpoints: Set[String]): Unit =
+    eventLogs(targetLogName) ! AddRedundantFilterConfig(logId(targetEndpointId, targetLogName), RedundantFilterConfig(targetLogName, redundantlyConnectedEndpoints))
 
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
