@@ -29,7 +29,7 @@ class ReplicationEndpoint(
     new AtomicReference(Map.empty)
 
   val system: ActorSystem =
-    ActorSystem(s"$id-system", config)
+    ActorSystem(s"$id-system", config.withFallback(ConfigFactory.load()))
 
   val settings: ReplicationSettings =
     new ReplicationSettings(system.settings.config)

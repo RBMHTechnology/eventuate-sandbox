@@ -16,46 +16,70 @@ import scala.collection.immutable.Seq
 object RedundantFilteredConnectionsSpec {
   val LogName = "L"
 
-  case object InternalEvent
-  case object ExternalEvent
+  case class InternalEvent(s: String)
+  case class ExternalEvent(s: String)
 
   def replicationFilter(implicit system: ActorSystem): ReplicationFilter = new ReplicationFilter {
     override def apply(event: EncodedEvent) =
-      EventPayloadSerializer.decode(event).get.payload.isInstanceOf[ExternalEvent.type]
+      EventPayloadSerializer.decode(event).get.payload.isInstanceOf[ExternalEvent]
   }
 
   def payloadEquals(payload: AnyRef): PartialFunction[Any, Any] = {
     case DecodedEvent(_, actual) if actual == payload => actual
   }
 
-  def bidiConnect(endpoint1: ReplicationEndpoint, endpoint2: ReplicationEndpoint): Unit = {
-    endpoint1.connect(endpoint2)
-    endpoint2.connect(endpoint1)
+  def bidiConnect(location1: Location, location2: Location): Unit = {
+    location1.endpoint.connect(location2.endpoint)
+    location2.endpoint.connect(location1.endpoint)
   }
 
-  def disconnect(endpoint1: ReplicationEndpoint, endpoint2: ReplicationEndpoint): Unit = {
-    endpoint1.disconnect(endpoint2.id)
-    endpoint2.disconnect(endpoint1.id)
+  def disconnect(location1: Location, location2: Location): Unit = {
+    location1.endpoint.disconnect(location2.endpoint.id)
+    location2.endpoint.disconnect(location1.endpoint.id)
   }
 
-  def bidiConnect(endpoint1: ReplicationEndpoint, endpoint2: ReplicationEndpoint, outboundFilter1: ReplicationFilter = NoFilter, outboundFilter2: ReplicationFilter = NoFilter, rfcEndpoints1: Set[ReplicationEndpoint]= Set.empty, rfcEndpoints2: Set[ReplicationEndpoint]= Set.empty): Unit = {
-    if(rfcEndpoints1.nonEmpty) endpoint1.addRedundantFilterConfig(endpoint2.id, LogName, rfcEndpoints1.map(_.id))
-    if(rfcEndpoints2.nonEmpty) endpoint2.addRedundantFilterConfig(endpoint1.id, LogName, rfcEndpoints2.map(_.id))
-    if(outboundFilter1 ne NoFilter) endpoint1.addTargetFilter(endpoint2.id, LogName, outboundFilter1)
-    if(outboundFilter2 ne NoFilter) endpoint2.addTargetFilter(endpoint1.id, LogName, outboundFilter2)
-    endpoint1.connect(endpoint2)
-    endpoint2.connect(endpoint1)
+  def bidiConnect(location1: Location, location2: Location, outboundFilter1: ReplicationFilter = NoFilter, outboundFilter2: ReplicationFilter = NoFilter, rfcEndpoints1: Set[Location]= Set.empty, rfcEndpoints2: Set[Location]= Set.empty): Unit = {
+    if(rfcEndpoints1.nonEmpty) location1.endpoint.addRedundantFilterConfig(location2.endpoint.id, LogName, rfcEndpoints1.map(_.endpoint.id))
+    if(rfcEndpoints2.nonEmpty) location2.endpoint.addRedundantFilterConfig(location1.endpoint.id, LogName, rfcEndpoints2.map(_.endpoint.id))
+    if(outboundFilter1 ne NoFilter) location1.endpoint.addTargetFilter(location2.endpoint.id, LogName, outboundFilter1)
+    if(outboundFilter2 ne NoFilter) location2.endpoint.addTargetFilter(location1.endpoint.id, LogName, outboundFilter2)
+    bidiConnect(location1, location2)
   }
 
-  def expectPayloads(probe: TestProbe, payloads: AnyRef*): Unit =
-    payloads.foreach { payload =>
-      probe.expectMsgPF(hint = s"${probe.ref} expects $payload")(payloadEquals(payload))
-    }
-
-  def expectPayloads(probes: Seq[TestProbe], payloads: AnyRef*): Unit =
-    probes.foreach(expectPayloads(_, payloads: _*))
+  def expectPayloads(payloads: Seq[AnyRef], locs: Location*) =
+    locs.foreach(_.expectPayloads(payloads))
 
   def event(payload: AnyRef): DecodedEvent = DecodedEvent("emitter-id", payload)
+
+  class Location(id: String) {
+    var eventCnt = 0
+    val endpoint = new ReplicationEndpoint(s"EP-$id", Set(LogName))
+    val probe = TestProbe(s"P-$id")(endpoint.system)
+    val log = endpoint.eventLogs(LogName)
+    log ! Subscribe(probe.ref)
+
+    def emit(makePayloads: Function1[String, AnyRef]*): Seq[AnyRef] = {
+      val payloads = makePayloads.toList.map {
+        eventCnt += 1
+        _(s"$id.$eventCnt")
+      }
+      log ! Write(payloads.map(DecodedEvent(s"EM-$id", _)))
+      payloads
+    }
+
+    def emitN(makePayload: String => AnyRef, n: Int = 1): Seq[AnyRef] =
+      emit(List.fill(n)(makePayload): _*)
+
+    def expectPayloads(payloads: Seq[AnyRef]): Unit =
+      payloads.foreach { payload =>
+        probe.expectMsgPF(hint = s"${probe.ref} expects $payload")(payloadEquals(payload))
+      }
+
+    def expectNoMsg(): Unit =
+      probe.expectNoMsg(200.millis)
+
+    val filter = replicationFilter(endpoint.system)
+  }
 }
 
 class RedundantFilteredConnectionsSpec extends WordSpec with BeforeAndAfterEach {
@@ -64,15 +88,9 @@ class RedundantFilteredConnectionsSpec extends WordSpec with BeforeAndAfterEach 
 
   private var systems: List[ActorSystem] = Nil
 
-  def newLocations(n: Int): List[(ReplicationEndpoint, TestProbe, ActorRef)] = {
-    val res = (1 to n).toList.map { i =>
-      val endpoint = new ReplicationEndpoint(s"EP-$i", Set(LogName))
-      val probe = TestProbe(s"P-$i")(endpoint.system)
-      val log = endpoint.eventLogs(LogName)
-      log ! Subscribe(probe.ref)
-      (endpoint, probe, log)
-    }
-    systems = res.map(_._1.system)
+  def newLocations(ids: String*): List[Location] = {
+    val res = ids.toList.map(i => new Location(i))
+    systems = res.map(_.endpoint.system)
     res
   }
 
@@ -85,60 +103,58 @@ class RedundantFilteredConnectionsSpec extends WordSpec with BeforeAndAfterEach 
       //   / \ (RFC)
       // B1 - B2
       // B1, B2 initially interrupted
-      val (a, probeA, logA) :: (b1, probeB1, logB1) :: (b2, probeB2, logB2) :: Nil = newLocations(3)
+      val a :: b1 :: b2 :: Nil = newLocations("A", "B1", "B2")
       val redundantConnectionsA = Set(b1, b2)
-      bidiConnect(a, b1, outboundFilter2 = replicationFilter(b1.system), rfcEndpoints1 = redundantConnectionsA)
-      bidiConnect(a, b2, outboundFilter2 = replicationFilter(b2.system), rfcEndpoints1 = redundantConnectionsA)
+      bidiConnect(a, b1, outboundFilter2 = b1.filter, rfcEndpoints1 = redundantConnectionsA)
+      bidiConnect(a, b2, outboundFilter2 = b2.filter, rfcEndpoints1 = redundantConnectionsA)
 
-      logA ! Write(List(event(ExternalEvent)))
-      expectPayloads(List(probeA, probeB1, probeB2), ExternalEvent)
+      expectPayloads(a.emit(ExternalEvent), a, b1, b2)
 
-      logB1 ! Write(List(event(InternalEvent), event(ExternalEvent)))
-      expectPayloads(probeA, ExternalEvent)
-      logA ! Write(List(event(ExternalEvent)))
-      probeB2.expectNoMsg(200.millis)
+      val fromB1 = b1.emit(InternalEvent, ExternalEvent)
+      expectPayloads(fromB1.filter(_.isInstanceOf[ExternalEvent]), a)
+
+      val fromA = a.emit(ExternalEvent)
+      b2.expectNoMsg()
 
       bidiConnect(b2, b1)
 
-      expectPayloads(probeB2, InternalEvent, ExternalEvent, ExternalEvent)
+      expectPayloads(fromB1 ++ fromA, b2)
     }
     "stop replication over redundant filtered from replicated application A1, A2 to replicated application B1, B2 and vice versa" in {
       // A1 - A2
       // | RFC |
       // B1 - B2
       // A1, A2 initially interrupted
-      val (a1, probeA1, logA1) :: (a2, probeA2, logA2) :: (b1, probeB1, logB1) :: (b2, probeB2, logB2) :: Nil = newLocations(4)
+      val a1 :: a2 :: b1 :: b2 :: Nil = newLocations("A1", "A2", "B1", "B2")
       val redundantConnectionsA = Set(b1, b2)
       val redundantConnectionsB = Set(a1, a2)
       bidiConnect(
-        endpoint1 = a1, outboundFilter1 = replicationFilter(a1.system), rfcEndpoints1 = redundantConnectionsA,
-        endpoint2 = b1, outboundFilter2 = replicationFilter(b1.system), rfcEndpoints2 = redundantConnectionsB)
+        location1 = a1, outboundFilter1 = a1.filter, rfcEndpoints1 = redundantConnectionsA,
+        location2 = b1, outboundFilter2 = b1.filter, rfcEndpoints2 = redundantConnectionsB)
       bidiConnect(
-        endpoint1 = a2, outboundFilter1 = replicationFilter(a2.system), rfcEndpoints1 = redundantConnectionsA,
-        endpoint2 = b2, outboundFilter2 = replicationFilter(b2.system), rfcEndpoints2 = redundantConnectionsB)
+        location1 = a2, outboundFilter1 = a2.filter, rfcEndpoints1 = redundantConnectionsA,
+        location2 = b2, outboundFilter2 = b2.filter, rfcEndpoints2 = redundantConnectionsB)
       bidiConnect(b1, b2)
 
-      logB1 ! Write(List(event(ExternalEvent)))
-      expectPayloads(List(probeB1, probeA1, probeB2, probeA2), ExternalEvent)
-      logB2 ! Write(List(event(ExternalEvent)))
-      expectPayloads(List(probeB2, probeA2, probeB1, probeA1), ExternalEvent)
+      expectPayloads(b1.emit(ExternalEvent), b1, a1, b2, a2)
+      expectPayloads(b2.emit(ExternalEvent), b2, a2, b1, a1)
 
-      logA1 ! Write(List(event(ExternalEvent)))
-      expectPayloads(List(probeA1, probeB1, probeB2), ExternalEvent)
-      logB2 ! Write(List(event(ExternalEvent)))
-      expectPayloads(List(probeB2, probeB1, probeA1), ExternalEvent)
-      probeA2.expectNoMsg(200.millis)
+      val fromA1 = a1.emit(ExternalEvent)
+      expectPayloads(fromA1, a1, b1, b2)
+      val fromB2 = b2.emit(ExternalEvent)
+      expectPayloads(fromB2, b2, b1, a1)
+      a2.expectNoMsg()
 
       disconnect(b1, b2)
       bidiConnect(a1, a2)
-      expectPayloads(probeA2, ExternalEvent, ExternalEvent)
+      expectPayloads(fromA1 ++ fromB2, a2)
 
-      logB2 ! Write(List(event(ExternalEvent)))
-      expectPayloads(List(probeB2, probeA2, probeA1), ExternalEvent)
-      probeB1.expectNoMsg(200.millis)
+      val fromB2_2 = b2.emit(ExternalEvent)
+      expectPayloads(fromB2_2, b2, a2, a1)
+      b1.expectNoMsg()
 
       bidiConnect(b1, b2)
-      expectPayloads(probeB1, ExternalEvent)
+      expectPayloads(fromB2_2, b1)
     }
   }
 }
