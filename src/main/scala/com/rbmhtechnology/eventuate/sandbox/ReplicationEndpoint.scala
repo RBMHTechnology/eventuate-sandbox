@@ -5,7 +5,6 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
-import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.IncompatibilityReason
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.typesafe.config._
@@ -30,7 +29,7 @@ class ReplicationEndpoint(
     new AtomicReference(Map.empty)
 
   val system: ActorSystem =
-    ActorSystem(s"$id-system", config)
+    ActorSystem(s"$id-system", config.withFallback(ConfigFactory.load()))
 
   val settings: ReplicationSettings =
     new ReplicationSettings(system.settings.config)
@@ -50,6 +49,9 @@ class ReplicationEndpoint(
 
   def addTargetFilter(targetEndpointId: String, targetLogName: String, filter: ReplicationFilter): Unit =
     eventLogs(targetLogName) ! AddTargetFilter(logId(targetEndpointId, targetLogName), filter)
+
+  def addRedundantFilterConfig(targetEndpointId: String, config: RedundantFilterConfig): Unit =
+    eventLogs(config.logName) ! AddRedundantFilterConfig(logId(targetEndpointId, config.logName), config)
 
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
@@ -150,6 +152,9 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
     case ReplicationReadSuccess(events, progress) =>
       context.become(writing)
       write(events, progress)
+    case ReplicationReadFailure(cause) =>
+      context.become(idle)
+      scheduleRead()
   }
 
   val writing: Receive = {

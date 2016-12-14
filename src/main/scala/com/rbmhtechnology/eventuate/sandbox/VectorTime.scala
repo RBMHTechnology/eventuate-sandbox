@@ -60,6 +60,9 @@ case class VectorTime(value: Map[String, Long] = Map.empty) {
   def merge(that: VectorTime): VectorTime =
     copy(value.unionWith(that.value)(math.max))
 
+  def projection(processIds: Set[String], negate: Boolean = false): VectorTime =
+    copy(value.filterKeys(p => processIds.contains(p) != negate).view.force)
+
   /**
    * Returns `true` if this vector time is equivalent (equal) to `that`.
    */

@@ -10,6 +10,8 @@ object ReplicationProtocol {
 
   case class AddTargetFilter(targetLogId: String, filter: ReplicationFilter)
 
+  case class AddRedundantFilterConfig(targetLogId: String, config: RedundantFilterConfig)
+
   case class GetReplicationSourceLogs(logNames: Set[String])
   case class GetReplicationSourceLogsSuccess(endpointId: String, sourceLogs: Map[String, ActorRef])
 

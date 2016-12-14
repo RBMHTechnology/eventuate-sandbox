@@ -1,6 +1,5 @@
 package com.rbmhtechnology.eventuate.sandbox
 
-import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.NoBlocker
 import com.rbmhtechnology.eventuate.sandbox.ReplicationDecider.Continue
 import com.rbmhtechnology.eventuate.sandbox.ReplicationDecider.ReplicationDecision
 
@@ -10,9 +9,14 @@ object ReplicationDecider {
   case class Block(reason: BlockReason) extends ReplicationDecision
   case object Continue extends ReplicationDecision
 
-  def apply(replicationFilter: ReplicationFilter, replicationBlocker:  ReplicationBlocker = NoBlocker): ReplicationDecider = new ReplicationDecider {
+  def apply(filter: ReplicationFilter): ReplicationDecider = new ReplicationDecider {
     override def apply(event: EncodedEvent) =
-      if (replicationFilter(event)) replicationBlocker(event).map(Block).getOrElse(Continue) else Filter
+      if (filter(event)) Continue else Filter
+  }
+
+  def apply(blocker:  ReplicationBlocker): ReplicationDecider = new ReplicationDecider {
+    override def apply(event: EncodedEvent) =
+      blocker(event).map(Block).getOrElse(Continue)
   }
 }
 
