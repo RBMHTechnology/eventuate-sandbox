@@ -50,8 +50,8 @@ class ReplicationEndpoint(
   def addTargetFilter(targetEndpointId: String, targetLogName: String, filter: ReplicationFilter): Unit =
     eventLogs(targetLogName) ! AddTargetFilter(logId(targetEndpointId, targetLogName), filter)
 
-  def addRedundantFilterConfig(targetEndpointId: String, targetLogName: String, redundantlyConnectedEndpoints: Set[String]): Unit =
-    eventLogs(targetLogName) ! AddRedundantFilterConfig(logId(targetEndpointId, targetLogName), RedundantFilterConfig(targetLogName, redundantlyConnectedEndpoints))
+  def addRedundantFilterConfig(targetEndpointId: String, config: RedundantFilterConfig): Unit =
+    eventLogs(config.logName) ! AddRedundantFilterConfig(logId(targetEndpointId, config.logName), config)
 
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
