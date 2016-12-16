@@ -171,8 +171,8 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
   private def fetch(): Unit =
     targetLog.ask(GetReplicationProgressAndVersionVector(sourceLogId))(settings.askTimeout).pipeTo(self)
 
-  private def read(fromSequenceNr: Long, targetVersionVector: VectorTime): Unit =
-    sourceLog.ask(ReplicationRead(fromSequenceNr, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
+  private def read(fromSequenceNo: Long, targetVersionVector: VectorTime): Unit =
+    sourceLog.ask(ReplicationRead(fromSequenceNo, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
 
   private def write(events: Seq[EncodedEvent], progress: Long): Unit =
     targetLog.ask(ReplicationWrite(events, sourceLogId, progress))(settings.askTimeout).pipeTo(self)

@@ -18,14 +18,14 @@ trait EventLogOps {
 
   protected def versionVector: VectorTime
 
-  protected def read(fromSequenceNr: Long): Seq[EncodedEvent]
+  protected def read(fromSequenceNo: Long): Seq[EncodedEvent]
 
   protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent]
 }
 
 trait InMemoryEventLog extends EventLogOps {
   // Implementation
-  private var _sequenceNr: Long = 0L
+  private var _sequenceNo: Long = 0L
   private var _versionVector: VectorTime = VectorTime.Zero
 
   private var eventStore: Vector[EncodedEvent] = Vector.empty
@@ -34,18 +34,18 @@ trait InMemoryEventLog extends EventLogOps {
   protected def versionVector: VectorTime =
     _versionVector
 
-  protected def read(fromSequenceNr: Long): Seq[EncodedEvent] =
-    eventStore.drop(fromSequenceNr.toInt - 1)
+  protected def read(fromSequenceNo: Long): Seq[EncodedEvent] =
+    eventStore.drop(fromSequenceNo.toInt - 1)
 
   protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
-    var snr = _sequenceNr
+    var sno = _sequenceNo
     var cvv = _versionVector
     var log = eventStore
 
     val written = events.map { event =>
-      snr = snr + 1L
+      sno = sno + 1L
 
-      val prepared = prepare(event, snr)
+      val prepared = prepare(event, sno)
 
       cvv = cvv.merge(prepared.metadata.vectorTimestamp)
       log = log :+ prepared
@@ -53,7 +53,7 @@ trait InMemoryEventLog extends EventLogOps {
       prepared
     }
 
-    _sequenceNr = snr
+    _sequenceNo = sno
     _versionVector = cvv
     eventStore = log
 
@@ -82,7 +82,7 @@ trait EventLogWithEventsourcing extends EventLogOps { this: Actor with EventSubs
 
   // Implementation
   private def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events, (evt, snr) => evt.emitted(id, snr))
+    write(events, (evt, sno) => evt.emitted(id, sno))
 
   private implicit val system = context.system
 
@@ -121,9 +121,9 @@ trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscr
   private def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationProcessor =
     ReplicationProcessor(replicationReadDecider(targetLogId, targetVersionVector, num) andThen ReplicationDecider(BlockAfter(num)))
 
-  private def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
+  private def replicationRead(fromSequenceNo: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
     replicationReadProcessor(targetLogId, targetVersionVector, num)
-      .apply(read(fromSequenceNr), fromSequenceNr)
+      .apply(read(fromSequenceNo), fromSequenceNo)
 
   private def causalityFilter(versionVector: VectorTime): ReplicationFilter = new ReplicationFilter {
     override def apply(event: EncodedEvent): Boolean = !event.before(versionVector)
@@ -132,7 +132,7 @@ trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscr
   private def replicationWrite(events: Seq[EncodedEvent], progress: Long, sourceLogId: String): ReplicationProcessResult = {
     replicationWriteProcessor(sourceLogId)
       .apply(events, progress).right.map {
-      case (filtered, updatedProgress) => (write(filtered, (evt, snr) => evt.replicated(id, snr)), updatedProgress)
+      case (filtered, updatedProgress) => (write(filtered, (evt, sno) => evt.replicated(id, sno)), updatedProgress)
     }
   }
 
