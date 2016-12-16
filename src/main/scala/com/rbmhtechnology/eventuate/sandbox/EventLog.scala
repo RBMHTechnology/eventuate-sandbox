@@ -1,5 +1,6 @@
 package com.rbmhtechnology.eventuate.sandbox
 
+import akka.actor.Actor.Receive
 import akka.actor._
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.stopOnUnserializableKeepOthers
@@ -13,25 +14,30 @@ import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 import scala.collection.immutable.Seq
 
 trait EventLogOps {
-  // --- EventLog ---
+  protected def id: String
+
+  protected def versionVector: VectorTime
+
+  protected def read(fromSequenceNr: Long): Seq[EncodedEvent]
+
+  protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent]
+}
+
+trait InMemoryEventLog extends EventLogOps {
+  // Implementation
   private var _sequenceNr: Long = 0L
   private var _versionVector: VectorTime = VectorTime.Zero
-  private var _deletionVector: VectorTime = VectorTime.Zero
 
-  var eventStore: Vector[EncodedEvent] = Vector.empty
+  private var eventStore: Vector[EncodedEvent] = Vector.empty
 
-  def id: String
-
-  def sequenceNr: Long =
-    _sequenceNr
-
-  def versionVector: VectorTime =
+  // API
+  protected def versionVector: VectorTime =
     _versionVector
 
-  def read(fromSequenceNr: Long): Seq[EncodedEvent] =
+  protected def read(fromSequenceNr: Long): Seq[EncodedEvent] =
     eventStore.drop(fromSequenceNr.toInt - 1)
 
-  private def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
+  protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
     var snr = _sequenceNr
     var cvv = _versionVector
     var log = eventStore
@@ -53,61 +59,35 @@ trait EventLogOps {
 
     written
   }
-
-  // --- Eventsourcing ---
-
-  def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events, (evt, snr) => evt.emitted(id, snr))
-
-  // --- Replication ---
-
-  private var progressStore: Map[String, Long] = Map.empty
-
-  def replicationWriteProcessor(sourceLogId: String, currentVersionVector: VectorTime): ReplicationProcessor
-  def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationProcessor
-
-  def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
-    replicationReadProcessor(targetLogId, targetVersionVector, num)
-      .apply(read(fromSequenceNr), fromSequenceNr)
-
-  def causalityFilter(versionVector: VectorTime): ReplicationFilter = new ReplicationFilter {
-    override def apply(event: EncodedEvent): Boolean = !event.before(versionVector)
-  }
-
-  def replicationWrite(events: Seq[EncodedEvent], progress: Long, sourceLogId: String): ReplicationProcessResult = {
-    replicationWriteProcessor(sourceLogId, versionVector)
-      .apply(events, progress).right.map {
-      case (filtered, updatedProgress) => (write(filtered, (evt, snr) => evt.replicated(id, snr)), updatedProgress)
-    }
-  }
-
-  def progressWrite(progresses: Map[String, Long]): Unit =
-    progressStore = progressStore ++ progresses
-
-  def progressRead(logId: String): Long =
-    progressStore.getOrElse(logId, 0L)
 }
 
 trait EventSubscribers {
+  // Implementation
   private var subscribers: Set[ActorRef] = Set.empty
 
-  def subscribe(subscriber: ActorRef): Unit =
+  // API
+  protected def subscribe(subscriber: ActorRef): Unit =
     subscribers = subscribers + subscriber
 
-  def publish(events: Seq[DecodedEvent]): Unit = for {
+  protected def publish(events: Seq[DecodedEvent]): Unit = for {
     e <- events
     s <- subscribers
   } s ! e
 
 }
 
-class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Actor with EventLogOps with EventSubscribers {
+trait EventLogWithEventsourcing extends EventLogOps { this: Actor with EventSubscribers =>
+
   import EventLog._
-  import context.system
 
-  /* --- Eventsourcing --- */
+  // Implementation
+  private def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
+    write(events, (evt, snr) => evt.emitted(id, snr))
 
-  private def eventsourcingReceive: Receive = {
+  private implicit val system = context.system
+
+  // API
+  protected def eventsourcingReceive: Receive = {
     case Subscribe(subscriber) =>
       subscribe(subscriber)
     case Read(from) =>
@@ -120,9 +100,50 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
       publish(decoded)
   }
 
-  /* --- Replication --- */
+}
 
-  private def replicationReceive: Receive = {
+trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscribers =>
+
+  import EventLogWithReplication._
+  import EventLog._
+
+  // Required
+  protected def replicationReadDecider(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationDecider
+  protected def replicationWriteDecider(sourceLogId: String): ReplicationDecider
+
+  // Implementation
+  private implicit val system = context.system
+
+  private var progressStore: Map[String, Long] = Map.empty
+
+  private def replicationWriteProcessor(sourceLogId: String): ReplicationProcessor =
+    ReplicationProcessor(replicationWriteDecider(sourceLogId))
+  private def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationProcessor =
+    ReplicationProcessor(replicationReadDecider(targetLogId, targetVersionVector, num) andThen ReplicationDecider(BlockAfter(num)))
+
+  private def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
+    replicationReadProcessor(targetLogId, targetVersionVector, num)
+      .apply(read(fromSequenceNr), fromSequenceNr)
+
+  private def causalityFilter(versionVector: VectorTime): ReplicationFilter = new ReplicationFilter {
+    override def apply(event: EncodedEvent): Boolean = !event.before(versionVector)
+  }
+
+  private def replicationWrite(events: Seq[EncodedEvent], progress: Long, sourceLogId: String): ReplicationProcessResult = {
+    replicationWriteProcessor(sourceLogId)
+      .apply(events, progress).right.map {
+      case (filtered, updatedProgress) => (write(filtered, (evt, snr) => evt.replicated(id, snr)), updatedProgress)
+    }
+  }
+
+  private def progressWrite(progresses: Map[String, Long]): Unit =
+    progressStore = progressStore ++ progresses
+
+  private def progressRead(logId: String): Long =
+    progressStore.getOrElse(logId, 0L)
+
+  // API
+  protected def replicationReceive: Receive = {
     case ReplicationRead(from, num, tlid, tvv) =>
       replicationRead(from, num, tlid, tvv) match {
         case Right((processedEvents, progress)) =>
@@ -144,41 +165,84 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
   }
 
-  /* --- Replication Filters --- */
+  protected def replicationReadCausalityDecider(targetVersionVector: VectorTime): ReplicationDecider =
+    ReplicationDecider(causalityFilter(targetVersionVector))
 
+  protected def replicationWriteCausalityDecider: ReplicationDecider =
+    ReplicationDecider(causalityFilter(versionVector))
+}
+
+object EventLogWithReplication {
+  class ReplicationStoppedException(reason: BlockReason)
+    extends IllegalStateException(s"Replication stopped: $reason")
+}
+
+trait EventLogWithReplicationFilters { this: EventLogWithReplication =>
+
+  // required
+  protected def sourceFilter: ReplicationFilter
+
+  // Implementation
   /** Maps target log ids to replication filters used for replication reads */
   private var targetFilters: Map[String, ReplicationFilter] =
     Map.empty
 
-  private def replicationFilterReceive: Receive = {
+  // API
+  protected def replicationFilterReceive: Receive = {
     case AddTargetFilter(logId, filter) =>
       targetFilters = targetFilters.updated(logId, filter)
   }
 
-  /* --- RFC --- */
+  protected def replicationReadFilterDecider(targetLogId: String): ReplicationDecider = {
+    val targetFilter = targetFilters.getOrElse(targetLogId, NoFilter)
+    ReplicationDecider(targetFilter and sourceFilter)
+  }
+}
 
+trait RedundantFilteredConnections { this: EventLogWithReplicationFilters =>
+  // Implementation
   /** Maps target log ids to [[RedundantFilterConfig]]s used to build [[RfcBlocker]]s for replication reads */
   private var redundantFilterConfigs: Map[String, RedundantFilterConfig] =
     Map.empty
 
-
-  private def rfcReceive: Receive = {
+  // API
+  protected def rfcReceive: Receive = {
     case AddRedundantFilterConfig(logId, config) =>
       redundantFilterConfigs += logId -> config
   }
 
-  /* --- Scheme evolution --- */
+  protected def replicationReadRfcDecider(targetLogId: String, targetVersionVector: VectorTime) = {
+    val rfcBlocker = redundantFilterConfigs.get(targetLogId).map(_.rfcBlocker(targetVersionVector)).getOrElse(NoBlocker)
+    ReplicationDecider(rfcBlocker)
+  }
+}
 
+trait EventLogWithSchemaEvolution { this: Actor with EventLogWithReplication =>
+  // Implementation
   /** Maps source log ids to [[ReplicationDecider]]s used for replication writes */
   private var eventCompatibilityDeciders: Map[String, ReplicationDecider] =
     Map.empty
 
-  private def schemaEvolutionReceive: Receive = {
+  private implicit val system = context.system
+
+  // API
+  protected def schemaEvolutionReceive: Receive = {
     case AddEventCompatibilityDecider(sourceLogId, processor) =>
       eventCompatibilityDeciders += sourceLogId -> processor
     case RemoveEventCompatibilityDecider(sourceLogId) =>
       eventCompatibilityDeciders -= sourceLogId
   }
+
+  protected def replicationWriteSchemaEvolutionDecider(sourceLogId: String) =
+    eventCompatibilityDeciders.getOrElse(sourceLogId, stopOnUnserializableKeepOthers)
+}
+
+class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Actor
+  with EventLogWithEventsourcing with EventSubscribers
+  with EventLogWithReplication
+  with EventLogWithReplicationFilters with RedundantFilteredConnections
+  with EventLogWithSchemaEvolution
+  with InMemoryEventLog {
 
   override def receive: Receive =
     eventsourcingReceive orElse
@@ -187,27 +251,14 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
     rfcReceive orElse
     schemaEvolutionReceive
 
-  /* --- Replication processors --- */
+  override def replicationWriteDecider(sourceLogId: String) =
+    replicationWriteCausalityDecider
+      .andThen(replicationWriteSchemaEvolutionDecider(sourceLogId))
 
-  override def replicationWriteProcessor(sourceLogId: String, currentVersionVector: VectorTime) =
-    ReplicationProcessor(
-      // replication
-      ReplicationDecider(causalityFilter(currentVersionVector))
-      // schema evolution
-      .andThen(eventCompatibilityDeciders.getOrElse(sourceLogId, stopOnUnserializableKeepOthers)))
-
-  override def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int) = {
-    val targetFilter = targetFilters.getOrElse(targetLogId, NoFilter)
-    val rfcBlocker = redundantFilterConfigs.get(targetLogId).map(_.rfcBlocker(targetVersionVector)).getOrElse(NoBlocker)
-    ReplicationProcessor(
-      // replication
-      ReplicationDecider(causalityFilter(targetVersionVector))
-      // replication filters
-      .andThen(ReplicationDecider(targetFilter and sourceFilter))
-      // RFC
-      .andThen(ReplicationDecider(rfcBlocker))
-      // replication
-      .andThen(ReplicationDecider(BlockAfter(num))))
+  override def replicationReadDecider(targetLogId: String, targetVersionVector: VectorTime, num: Int) = {
+    replicationReadCausalityDecider(targetVersionVector)
+      .andThen(replicationReadFilterDecider(targetLogId))
+      .andThen(replicationReadRfcDecider(targetLogId, targetVersionVector))
   }
 }
 
@@ -223,7 +274,4 @@ object EventLog {
 
   def decode(events: Seq[EncodedEvent])(implicit system: ActorSystem): Seq[DecodedEvent] =
     events.map(e => EventPayloadSerializer.decode(e).get)
-
-  class ReplicationStoppedException(reason: BlockReason)
-    extends IllegalStateException(s"Replication stopped: $reason")
 }
