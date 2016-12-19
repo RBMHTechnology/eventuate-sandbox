@@ -12,6 +12,7 @@ import com.rbmhtechnology.eventuate.sandbox.ReplicationProcessor.ReplicationProc
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.BlockAfter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.NoBlocker
+import com.rbmhtechnology.eventuate.sandbox.VectorTime.merge
 import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 import com.typesafe.config.Config
 
@@ -88,7 +89,7 @@ trait InMemoryEventLog extends EventLogOps {
   protected def deleteWhile(cond: EncodedEvent => Boolean): Long = {
     val (deleted, updatedEventStore) = eventStore.span(cond)
     eventStore = updatedEventStore
-    _deletionVector = deleted.foldLeft(_deletionVector)((dvv, ev) => dvv.merge(ev.metadata.vectorTimestamp))
+    _deletionVector = _deletionVector.merge(merge(deleted.map(_.metadata.vectorTimestamp)))
     deleted.lastOption.map(_.metadata.localSequenceNo).getOrElse(0)
   }
 }

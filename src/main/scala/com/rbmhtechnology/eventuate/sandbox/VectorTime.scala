@@ -178,4 +178,7 @@ object VectorTime {
       go(xValue.keySet.union(yValue.keySet).toList, 0).map(_.toInt)
     }
   }
+
+  def merge(times: Seq[VectorTime]): VectorTime =
+    times.foldLeft(VectorTime.Zero)(_ merge _)
 }
