@@ -1,45 +1,76 @@
 package com.rbmhtechnology.eventuate.sandbox
 
+import java.util.concurrent.TimeUnit
+
+import akka.actor.Actor.Receive
 import akka.actor._
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.stopOnUnserializableKeepOthers
+import com.rbmhtechnology.eventuate.sandbox.EventLogWithDeferredDeletion.DeferredDeletionSettings
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProcessor.ReplicationProcessResult
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.BlockAfter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.NoBlocker
 import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
+import com.typesafe.config.Config
 
 import scala.collection.immutable.Seq
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.DurationLong
 
 trait EventLogOps {
-  // --- EventLog ---
-  private var _sequenceNr: Long = 0L
+  protected def id: String
+
+  protected def versionVector: VectorTime
+
+  protected def read(fromSequenceNo: Long): Seq[EncodedEvent]
+
+  protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent]
+
+  protected def deleteWhile(cond: EncodedEvent => Boolean): Long
+}
+
+trait ProgressStoreOps {
+
+  protected def progressWrite(progresses: Map[String, Long]): Unit
+
+  protected def progressRead(logId: String): Long
+
+  protected def versionVectorWrite(logId: String, versionVector: VectorTime): Unit
+
+  protected def versionVectorRead(logId: String): Option[VectorTime]
+
+  protected def versionVectorReadAll: Map[String, VectorTime]
+}
+
+trait InMemoryEventLog extends EventLogOps {
+  // Implementation
+  private var _sequenceNo: Long = 0L
   private var _versionVector: VectorTime = VectorTime.Zero
   private var _deletionVector: VectorTime = VectorTime.Zero
 
-  var eventStore: Vector[EncodedEvent] = Vector.empty
+  private var eventStore: Vector[EncodedEvent] = Vector.empty
 
-  def id: String
-
-  def sequenceNr: Long =
-    _sequenceNr
-
-  def versionVector: VectorTime =
+  // API
+  protected def versionVector: VectorTime =
     _versionVector
 
-  def read(fromSequenceNr: Long): Seq[EncodedEvent] =
-    eventStore.drop(fromSequenceNr.toInt - 1)
+  protected def deletionVector: VectorTime =
+    _deletionVector
 
-  private def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
-    var snr = _sequenceNr
+  protected def read(fromSequenceNo: Long): Seq[EncodedEvent] =
+    eventStore.dropWhile(_.metadata.localSequenceNo < fromSequenceNo)
+
+  protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
+    var sno = _sequenceNo
     var cvv = _versionVector
     var log = eventStore
 
     val written = events.map { event =>
-      snr = snr + 1L
+      sno = sno + 1L
 
-      val prepared = prepare(event, snr)
+      val prepared = prepare(event, sno)
 
       cvv = cvv.merge(prepared.metadata.vectorTimestamp)
       log = log :+ prepared
@@ -47,67 +78,79 @@ trait EventLogOps {
       prepared
     }
 
-    _sequenceNr = snr
+    _sequenceNo = sno
     _versionVector = cvv
     eventStore = log
 
     written
   }
 
-  // --- Eventsourcing ---
+  protected def deleteWhile(cond: EncodedEvent => Boolean): Long = {
+    val (deleted, updatedEventStore) = eventStore.span(cond)
+    eventStore = updatedEventStore
+    _deletionVector = deleted.foldLeft(_deletionVector)((dvv, ev) => dvv.merge(ev.metadata.vectorTimestamp))
+    deleted.lastOption.map(_.metadata.localSequenceNo).getOrElse(0)
+  }
+}
 
-  def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
-    write(events, (evt, snr) => evt.emitted(id, snr))
-
-  // --- Replication ---
-
+trait InMemoryProgressStore extends ProgressStoreOps {
+  // Implementation
   private var progressStore: Map[String, Long] = Map.empty
 
-  def replicationWriteProcessor(sourceLogId: String, currentVersionVector: VectorTime): ReplicationProcessor
-  def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationProcessor
+  /** Maps target log ids to respective version vector */
+  private var versionVectorStore: Map[String, VectorTime] = Map.empty
 
-  def replicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
-    replicationReadProcessor(targetLogId, targetVersionVector, num)
-      .apply(read(fromSequenceNr), fromSequenceNr)
-
-  def causalityFilter(versionVector: VectorTime): ReplicationFilter = new ReplicationFilter {
-    override def apply(event: EncodedEvent): Boolean = !event.before(versionVector)
-  }
-
-  def replicationWrite(events: Seq[EncodedEvent], progress: Long, sourceLogId: String): ReplicationProcessResult = {
-    replicationWriteProcessor(sourceLogId, versionVector)
-      .apply(events, progress).right.map {
-      case (filtered, updatedProgress) => (write(filtered, (evt, snr) => evt.replicated(id, snr)), updatedProgress)
-    }
-  }
-
-  def progressWrite(progresses: Map[String, Long]): Unit =
+  // API
+  protected def progressWrite(progresses: Map[String, Long]): Unit =
     progressStore = progressStore ++ progresses
 
-  def progressRead(logId: String): Long =
+  protected def progressRead(logId: String): Long =
     progressStore.getOrElse(logId, 0L)
+
+  protected def versionVectorWrite(logId: String, versionVector: VectorTime): Unit =
+    versionVectorStore += logId -> versionVector
+
+  protected def versionVectorRead(logId: String): Option[VectorTime] =
+    versionVectorStore.get(logId)
+
+  override protected def versionVectorReadAll: Map[String, VectorTime] =
+    versionVectorStore
+}
+
+trait EventLogWithImmediateDeletion extends EventLogOps {
+  protected def deleteReceive(): Receive = {
+    case Delete(toSequenceNo) =>
+      deleteWhile(_.metadata.localSequenceNo <= toSequenceNo)
+  }
 }
 
 trait EventSubscribers {
+  // Implementation
   private var subscribers: Set[ActorRef] = Set.empty
 
-  def subscribe(subscriber: ActorRef): Unit =
+  // API
+  protected def subscribe(subscriber: ActorRef): Unit =
     subscribers = subscribers + subscriber
 
-  def publish(events: Seq[DecodedEvent]): Unit = for {
+  protected def publish(events: Seq[DecodedEvent]): Unit = for {
     e <- events
     s <- subscribers
   } s ! e
 
 }
 
-class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Actor with EventLogOps with EventSubscribers {
+trait EventLogWithEventsourcing extends EventLogOps { this: Actor with EventSubscribers =>
+
   import EventLog._
-  import context.system
 
-  /* --- Eventsourcing --- */
+  // Implementation
+  private def emissionWrite(events: Seq[EncodedEvent]): Seq[EncodedEvent] =
+    write(events, (evt, sno) => evt.emitted(id, sno))
 
-  private def eventsourcingReceive: Receive = {
+  private implicit val system = context.system
+
+  // API
+  protected def eventsourcingReceive: Receive = {
     case Subscribe(subscriber) =>
       subscribe(subscriber)
     case Read(from) =>
@@ -120,10 +163,44 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
       publish(decoded)
   }
 
-  /* --- Replication --- */
+}
 
-  private def replicationReceive: Receive = {
+trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: Actor with EventSubscribers =>
+
+  import EventLogWithReplication._
+  import EventLog._
+
+  // Required
+  protected def replicationReadDecider(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationDecider
+  protected def replicationWriteDecider(sourceLogId: String): ReplicationDecider
+
+  // Implementation
+  private implicit val system = context.system
+
+  private def replicationWriteProcessor(sourceLogId: String): ReplicationProcessor =
+    ReplicationProcessor(replicationWriteDecider(sourceLogId))
+  private def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int): ReplicationProcessor =
+    ReplicationProcessor(replicationReadDecider(targetLogId, targetVersionVector, num) andThen ReplicationDecider(BlockAfter(num)))
+
+  private def replicationRead(fromSequenceNo: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime): ReplicationProcessResult =
+    replicationReadProcessor(targetLogId, targetVersionVector, num)
+      .apply(read(fromSequenceNo), fromSequenceNo)
+
+  private def causalityFilter(versionVector: VectorTime): ReplicationFilter = new ReplicationFilter {
+    override def apply(event: EncodedEvent): Boolean = !event.before(versionVector)
+  }
+
+  private def replicationWrite(events: Seq[EncodedEvent], progress: Long, sourceLogId: String): ReplicationProcessResult = {
+    replicationWriteProcessor(sourceLogId)
+      .apply(events, progress).right.map {
+      case (filtered, updatedProgress) => (write(filtered, (evt, sno) => evt.replicated(id, sno)), updatedProgress)
+    }
+  }
+
+  // API
+  protected def replicationReceive: Receive = {
     case ReplicationRead(from, num, tlid, tvv) =>
+      versionVectorWrite(tlid, tvv)
       replicationRead(from, num, tlid, tvv) match {
         case Right((processedEvents, progress)) =>
           sender() ! ReplicationReadSuccess(processedEvents, progress)
@@ -144,70 +221,132 @@ class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Acto
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
   }
 
-  /* --- Replication Filters --- */
+  protected def replicationReadCausalityDecider(targetVersionVector: VectorTime): ReplicationDecider =
+    ReplicationDecider(causalityFilter(targetVersionVector))
 
+  protected def replicationWriteCausalityDecider: ReplicationDecider =
+    ReplicationDecider(causalityFilter(versionVector))
+}
+
+object EventLogWithReplication {
+  class ReplicationStoppedException(reason: BlockReason)
+    extends IllegalStateException(s"Replication stopped: $reason")
+}
+
+trait EventLogWithDeferredDeletion { this: Actor with EventLogWithReplication =>
+
+  private val settings: DeferredDeletionSettings =
+    new DeferredDeletionSettings(context.system.settings.config)
+
+  private val scheduler = context.system.scheduler
+
+  import context.dispatcher
+
+  private var deletedToSequenceNo: Long = 0L
+
+  protected def deleteReceive(): Receive = {
+    case Delete(toSequenceNo) =>
+      deletedToSequenceNo = deleteWhile { event =>
+        event.metadata.localSequenceNo <= toSequenceNo &&
+          versionVectorReadAll.values.forall(event.metadata.vectorTimestamp <= _)
+      }
+      if(deletedToSequenceNo < toSequenceNo)
+        scheduler.scheduleOnce(settings.retryDelay, self, Delete(toSequenceNo))
+  }
+}
+
+object EventLogWithDeferredDeletion {
+  class DeferredDeletionSettings(config: Config) {
+    val retryDelay: FiniteDuration =
+      config.getDuration("sandbox.log.delete.retry-delay", TimeUnit.MILLISECONDS).millis
+  }
+
+}
+
+trait EventLogWithReplicationFilters { this: EventLogWithReplication =>
+
+  // required
+  protected def sourceFilter: ReplicationFilter
+
+  // Implementation
   /** Maps target log ids to replication filters used for replication reads */
   private var targetFilters: Map[String, ReplicationFilter] =
     Map.empty
 
-  private def replicationFilterReceive: Receive = {
+  // API
+  protected def replicationFilterReceive: Receive = {
     case AddTargetFilter(logId, filter) =>
       targetFilters = targetFilters.updated(logId, filter)
   }
 
-  /* --- RFC --- */
+  protected def replicationReadFilterDecider(targetLogId: String): ReplicationDecider = {
+    val targetFilter = targetFilters.getOrElse(targetLogId, NoFilter)
+    ReplicationDecider(targetFilter and sourceFilter)
+  }
+}
 
+trait RedundantFilteredConnections { this: EventLogWithReplicationFilters =>
+  // Implementation
   /** Maps target log ids to [[RedundantFilterConfig]]s used to build [[RfcBlocker]]s for replication reads */
   private var redundantFilterConfigs: Map[String, RedundantFilterConfig] =
     Map.empty
 
-
-  private def rfcReceive: Receive = {
+  // API
+  protected def rfcReceive: Receive = {
     case AddRedundantFilterConfig(logId, config) =>
       redundantFilterConfigs += logId -> config
   }
 
-  /* --- Scheme evolution --- */
+  protected def replicationReadRfcDecider(targetLogId: String, targetVersionVector: VectorTime) = {
+    val rfcBlocker = redundantFilterConfigs.get(targetLogId).map(_.rfcBlocker(targetVersionVector)).getOrElse(NoBlocker)
+    ReplicationDecider(rfcBlocker)
+  }
+}
 
+trait EventLogWithSchemaEvolution { this: Actor with EventLogWithReplication =>
+  // Implementation
   /** Maps source log ids to [[ReplicationDecider]]s used for replication writes */
   private var eventCompatibilityDeciders: Map[String, ReplicationDecider] =
     Map.empty
 
-  private def schemaEvolutionReceive: Receive = {
+  private implicit val system = context.system
+
+  // API
+  protected def schemaEvolutionReceive: Receive = {
     case AddEventCompatibilityDecider(sourceLogId, processor) =>
       eventCompatibilityDeciders += sourceLogId -> processor
     case RemoveEventCompatibilityDecider(sourceLogId) =>
       eventCompatibilityDeciders -= sourceLogId
   }
 
+  protected def replicationWriteSchemaEvolutionDecider(sourceLogId: String) =
+    eventCompatibilityDeciders.getOrElse(sourceLogId, stopOnUnserializableKeepOthers)
+}
+
+class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Actor
+  with EventLogWithEventsourcing with EventSubscribers
+  with EventLogWithDeferredDeletion
+  with EventLogWithReplication
+  with EventLogWithReplicationFilters with RedundantFilteredConnections
+  with EventLogWithSchemaEvolution
+  with InMemoryEventLog with InMemoryProgressStore {
+
   override def receive: Receive =
     eventsourcingReceive orElse
+    deleteReceive orElse
     replicationReceive orElse
     replicationFilterReceive orElse
     rfcReceive orElse
     schemaEvolutionReceive
 
-  /* --- Replication processors --- */
+  override def replicationWriteDecider(sourceLogId: String) =
+    replicationWriteCausalityDecider
+      .andThen(replicationWriteSchemaEvolutionDecider(sourceLogId))
 
-  override def replicationWriteProcessor(sourceLogId: String, currentVersionVector: VectorTime) =
-    ReplicationProcessor(
-      // replication
-      ReplicationDecider(causalityFilter(currentVersionVector))
-      // schema evolution
-      .andThen(eventCompatibilityDeciders.getOrElse(sourceLogId, stopOnUnserializableKeepOthers)))
-
-  override def replicationReadProcessor(targetLogId: String, targetVersionVector: VectorTime, num: Int) = {
-    val targetFilter = targetFilters.getOrElse(targetLogId, NoFilter)
-    val rfcBlocker = redundantFilterConfigs.get(targetLogId).map(_.rfcBlocker(targetVersionVector)).getOrElse(NoBlocker)
-    ReplicationProcessor(
-      // replication
-      ReplicationDecider(causalityFilter(targetVersionVector))
-      // replication filters
-      .andThen(ReplicationDecider(targetFilter and sourceFilter))
-      // RFC
-      .andThen(ReplicationDecider(rfcBlocker))
-      // replication
-      .andThen(ReplicationDecider(BlockAfter(num))))
+  override def replicationReadDecider(targetLogId: String, targetVersionVector: VectorTime, num: Int) = {
+    replicationReadCausalityDecider(targetVersionVector)
+      .andThen(replicationReadFilterDecider(targetLogId))
+      .andThen(replicationReadRfcDecider(targetLogId, targetVersionVector))
   }
 }
 
@@ -223,7 +362,4 @@ object EventLog {
 
   def decode(events: Seq[EncodedEvent])(implicit system: ActorSystem): Seq[DecodedEvent] =
     events.map(e => EventPayloadSerializer.decode(e).get)
-
-  class ReplicationStoppedException(reason: BlockReason)
-    extends IllegalStateException(s"Replication stopped: $reason")
 }

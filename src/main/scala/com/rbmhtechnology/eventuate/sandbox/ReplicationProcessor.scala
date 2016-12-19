@@ -25,7 +25,7 @@ case class ReplicationProcessor(replicationDecider: ReplicationDecider) {
           case Block(reason) =>
             Either.cond(lastProgress > 0, (out, lastProgress), reason)
           case decision =>
-            lastProgress = seq.head.metadata.localSequenceNr
+            lastProgress = seq.head.metadata.localSequenceNo
             go(seq.tail, if(decision == Filter) out else out :+ seq.head)
         }
     }

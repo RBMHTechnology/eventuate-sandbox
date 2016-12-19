@@ -18,7 +18,7 @@ object ReplicationProtocol {
   case class GetReplicationProgressAndVersionVector(sourceLogId: String)
   case class GetReplicationProgressAndVersionVectorSuccess(progress: Long, targetVersionVector: VectorTime)
 
-  case class ReplicationRead(fromSequenceNr: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime)
+  case class ReplicationRead(fromSequenceNo: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime)
   case class ReplicationReadSuccess(events: Seq[EncodedEvent], progress: Long)
   case class ReplicationReadFailure(cause: Throwable)
 

@@ -5,6 +5,7 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
+import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol.Delete
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.typesafe.config._
@@ -64,7 +65,7 @@ class ReplicationEndpoint(
       eventCompatibilityDeciders.foreach { case (logName, processor) =>
         eventLogs.get(logName).foreach(_ ! AddEventCompatibilityDecider(logId(reply.endpointId, logName), processor))
       }
-      //TODO make sure processors are added before replicators are started
+      //TODO make sure deciders are added before replicators are started
       val replicators = reply.sourceLogs.map {
         case (logName, sourceLog) =>
           val sourceLogId = logId(reply.endpointId, logName)
@@ -81,6 +82,9 @@ class ReplicationEndpoint(
       eventLog ! RemoveEventCompatibilityDecider(logId(remoteEndpointId, logName))
     }
   }
+
+  def delete(logName: String, toSequenceNo: Long): Unit =
+    eventLogs.get(logName).foreach(_ ! Delete(toSequenceNo))
 
   def terminate(): Future[Terminated] =
     system.terminate()
@@ -171,8 +175,8 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
   private def fetch(): Unit =
     targetLog.ask(GetReplicationProgressAndVersionVector(sourceLogId))(settings.askTimeout).pipeTo(self)
 
-  private def read(fromSequenceNr: Long, targetVersionVector: VectorTime): Unit =
-    sourceLog.ask(ReplicationRead(fromSequenceNr, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
+  private def read(fromSequenceNo: Long, targetVersionVector: VectorTime): Unit =
+    sourceLog.ask(ReplicationRead(fromSequenceNo, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
 
   private def write(events: Seq[EncodedEvent], progress: Long): Unit =
     targetLog.ask(ReplicationWrite(events, sourceLogId, progress))(settings.askTimeout).pipeTo(self)
