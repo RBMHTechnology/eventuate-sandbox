@@ -12,4 +12,6 @@ object EventsourcingProtocol {
 
   case class Write(events: Seq[DecodedEvent])
   case class WriteSuccess(events: Seq[DecodedEvent])
+
+  case class Delete(toSequenceNo: Long)
 }

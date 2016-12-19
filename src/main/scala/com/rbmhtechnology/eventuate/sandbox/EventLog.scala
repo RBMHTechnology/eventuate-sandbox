@@ -1,17 +1,23 @@
 package com.rbmhtechnology.eventuate.sandbox
 
+import java.util.concurrent.TimeUnit
+
 import akka.actor.Actor.Receive
 import akka.actor._
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.stopOnUnserializableKeepOthers
+import com.rbmhtechnology.eventuate.sandbox.EventLogWithDeferredDeletion.DeferredDeletionSettings
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProcessor.ReplicationProcessResult
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.BlockAfter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationBlocker.NoBlocker
 import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
+import com.typesafe.config.Config
 
 import scala.collection.immutable.Seq
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.DurationLong
 
 trait EventLogOps {
   protected def id: String
@@ -21,12 +27,28 @@ trait EventLogOps {
   protected def read(fromSequenceNo: Long): Seq[EncodedEvent]
 
   protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent]
+
+  protected def deleteWhile(cond: EncodedEvent => Boolean): Long
+}
+
+trait ProgressStoreOps {
+
+  protected def progressWrite(progresses: Map[String, Long]): Unit
+
+  protected def progressRead(logId: String): Long
+
+  protected def versionVectorWrite(logId: String, versionVector: VectorTime): Unit
+
+  protected def versionVectorRead(logId: String): Option[VectorTime]
+
+  protected def versionVectorReadAll: Map[String, VectorTime]
 }
 
 trait InMemoryEventLog extends EventLogOps {
   // Implementation
   private var _sequenceNo: Long = 0L
   private var _versionVector: VectorTime = VectorTime.Zero
+  private var _deletionVector: VectorTime = VectorTime.Zero
 
   private var eventStore: Vector[EncodedEvent] = Vector.empty
 
@@ -34,8 +56,11 @@ trait InMemoryEventLog extends EventLogOps {
   protected def versionVector: VectorTime =
     _versionVector
 
+  protected def deletionVector: VectorTime =
+    _deletionVector
+
   protected def read(fromSequenceNo: Long): Seq[EncodedEvent] =
-    eventStore.drop(fromSequenceNo.toInt - 1)
+    eventStore.dropWhile(_.metadata.localSequenceNo < fromSequenceNo)
 
   protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent] = {
     var sno = _sequenceNo
@@ -58,6 +83,44 @@ trait InMemoryEventLog extends EventLogOps {
     eventStore = log
 
     written
+  }
+
+  protected def deleteWhile(cond: EncodedEvent => Boolean): Long = {
+    val (deleted, updatedEventStore) = eventStore.span(cond)
+    eventStore = updatedEventStore
+    _deletionVector = deleted.foldLeft(_deletionVector)((dvv, ev) => dvv.merge(ev.metadata.vectorTimestamp))
+    deleted.lastOption.map(_.metadata.localSequenceNo).getOrElse(0)
+  }
+}
+
+trait InMemoryProgressStore extends ProgressStoreOps {
+  // Implementation
+  private var progressStore: Map[String, Long] = Map.empty
+
+  /** Maps target log ids to respective version vector */
+  private var versionVectorStore: Map[String, VectorTime] = Map.empty
+
+  // API
+  protected def progressWrite(progresses: Map[String, Long]): Unit =
+    progressStore = progressStore ++ progresses
+
+  protected def progressRead(logId: String): Long =
+    progressStore.getOrElse(logId, 0L)
+
+  protected def versionVectorWrite(logId: String, versionVector: VectorTime): Unit =
+    versionVectorStore += logId -> versionVector
+
+  protected def versionVectorRead(logId: String): Option[VectorTime] =
+    versionVectorStore.get(logId)
+
+  override protected def versionVectorReadAll: Map[String, VectorTime] =
+    versionVectorStore
+}
+
+trait EventLogWithImmediateDeletion extends EventLogOps {
+  protected def deleteReceive(): Receive = {
+    case Delete(toSequenceNo) =>
+      deleteWhile(_.metadata.localSequenceNo <= toSequenceNo)
   }
 }
 
@@ -102,7 +165,7 @@ trait EventLogWithEventsourcing extends EventLogOps { this: Actor with EventSubs
 
 }
 
-trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscribers =>
+trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: Actor with EventSubscribers =>
 
   import EventLogWithReplication._
   import EventLog._
@@ -113,8 +176,6 @@ trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscr
 
   // Implementation
   private implicit val system = context.system
-
-  private var progressStore: Map[String, Long] = Map.empty
 
   private def replicationWriteProcessor(sourceLogId: String): ReplicationProcessor =
     ReplicationProcessor(replicationWriteDecider(sourceLogId))
@@ -136,15 +197,10 @@ trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscr
     }
   }
 
-  private def progressWrite(progresses: Map[String, Long]): Unit =
-    progressStore = progressStore ++ progresses
-
-  private def progressRead(logId: String): Long =
-    progressStore.getOrElse(logId, 0L)
-
   // API
   protected def replicationReceive: Receive = {
     case ReplicationRead(from, num, tlid, tvv) =>
+      versionVectorWrite(tlid, tvv)
       replicationRead(from, num, tlid, tvv) match {
         case Right((processedEvents, progress)) =>
           sender() ! ReplicationReadSuccess(processedEvents, progress)
@@ -175,6 +231,36 @@ trait EventLogWithReplication extends EventLogOps { this: Actor with EventSubscr
 object EventLogWithReplication {
   class ReplicationStoppedException(reason: BlockReason)
     extends IllegalStateException(s"Replication stopped: $reason")
+}
+
+trait EventLogWithDeferredDeletion { this: Actor with EventLogWithReplication =>
+
+  private val settings: DeferredDeletionSettings =
+    new DeferredDeletionSettings(context.system.settings.config)
+
+  private val scheduler = context.system.scheduler
+
+  import context.dispatcher
+
+  private var deletedToSequenceNo: Long = 0L
+
+  protected def deleteReceive(): Receive = {
+    case Delete(toSequenceNo) =>
+      deletedToSequenceNo = deleteWhile { event =>
+        event.metadata.localSequenceNo <= toSequenceNo &&
+          versionVectorReadAll.values.forall(event.metadata.vectorTimestamp <= _)
+      }
+      if(deletedToSequenceNo < toSequenceNo)
+        scheduler.scheduleOnce(settings.retryDelay, self, Delete(toSequenceNo))
+  }
+}
+
+object EventLogWithDeferredDeletion {
+  class DeferredDeletionSettings(config: Config) {
+    val retryDelay: FiniteDuration =
+      config.getDuration("sandbox.log.delete.retry-delay", TimeUnit.MILLISECONDS).millis
+  }
+
 }
 
 trait EventLogWithReplicationFilters { this: EventLogWithReplication =>
@@ -239,13 +325,15 @@ trait EventLogWithSchemaEvolution { this: Actor with EventLogWithReplication =>
 
 class EventLog(val id: String, val sourceFilter: ReplicationFilter) extends Actor
   with EventLogWithEventsourcing with EventSubscribers
+  with EventLogWithDeferredDeletion
   with EventLogWithReplication
   with EventLogWithReplicationFilters with RedundantFilteredConnections
   with EventLogWithSchemaEvolution
-  with InMemoryEventLog {
+  with InMemoryEventLog with InMemoryProgressStore {
 
   override def receive: Receive =
     eventsourcingReceive orElse
+    deleteReceive orElse
     replicationReceive orElse
     replicationFilterReceive orElse
     rfcReceive orElse

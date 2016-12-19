@@ -8,6 +8,7 @@ import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
 import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 import org.scalatest._
+import org.scalatest.concurrent.Eventually
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.time.Millis
 import org.scalatest.time.Span
@@ -31,7 +32,7 @@ object EventLogSpec {
     new ExcludePayload(payload)
 }
 
-class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with Matchers with BeforeAndAfterEach with BeforeAndAfterAll with ScalaFutures {
+class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with Matchers with BeforeAndAfterEach with BeforeAndAfterAll with ScalaFutures with Eventually {
   import EventLogSpec._
   import EventLog._
 
@@ -151,6 +152,20 @@ class EventLogSpec extends TestKit(ActorSystem("test")) with WordSpecLike with M
 
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 1L, VectorTime(LogId2 -> 1L)), "a"))
       probe.expectMsg(DecodedEvent(EventMetadata(EmitterId2, LogId2, LogId1, 2L, VectorTime(LogId2 -> 2L)), "b"))
+    }
+    "process Delete" in {
+      val emitted = Seq(
+        DecodedEvent(EmitterId1, "a"),
+        DecodedEvent(EmitterId1, "b"))
+
+      log ! Write(emitted)
+      log ! Delete(1)
+
+      eventually {
+        whenReady(log.ask(Read(1L))) {
+          case ReadSuccess(events) => events.map(_.payload) should be(emitted.tail.map(_.payload))
+        }
+      }
     }
   }
 }
