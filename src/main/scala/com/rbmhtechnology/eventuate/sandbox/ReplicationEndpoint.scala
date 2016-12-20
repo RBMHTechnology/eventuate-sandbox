@@ -5,9 +5,13 @@ import java.util.function.UnaryOperator
 
 import akka.actor._
 import akka.pattern.{ask, pipe}
+import akka.util.Timeout
+import com.rbmhtechnology.eventuate.sandbox.EventLog.getLogInfo
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol.Delete
+import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint.logId
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
+import com.rbmhtechnology.eventuate.sandbox.future.Retry
 import com.typesafe.config._
 
 import scala.collection.immutable.Seq
@@ -16,6 +20,11 @@ import scala.concurrent.Future
 object ReplicationEndpoint {
   def logId(endpointId: String, logName: String): String =
     s"${endpointId}_$logName"
+
+  sealed trait ReplicationHistory
+  case object CompleteHistory extends ReplicationHistory
+  case object CurrentHistory extends ReplicationHistory
+  case object NoHistory extends ReplicationHistory
 }
 
 class ReplicationEndpoint(
@@ -44,6 +53,8 @@ class ReplicationEndpoint(
     createConnectionAcceptor()
 
   import system.dispatcher
+  implicit private val scheduler = system.scheduler
+  implicit private val askTimeout: Timeout = settings.askTimeout
 
   def connections: Set[String] =
     _connections.get.keySet
@@ -57,24 +68,24 @@ class ReplicationEndpoint(
   def connect(remoteEndpoint: ReplicationEndpoint): Future[String] =
     connect(remoteEndpoint.connectionAcceptor)
 
+  def connect(remoteEndpoint: ReplicationEndpoint, history: ReplicationHistory): Future[String] =
+    connect(remoteEndpoint.connectionAcceptor, history = history)
+
   def connect(remoteEndpoint: ReplicationEndpoint, eventCompatibilityDeciders: Map[String, ReplicationDecider]): Future[String] =
     connect(remoteEndpoint.connectionAcceptor, eventCompatibilityDeciders)
 
-  def connect(remoteAcceptor: ActorRef, eventCompatibilityDeciders: Map[String, ReplicationDecider] = Map.empty): Future[String] =
-    remoteAcceptor.ask(GetReplicationSourceLogs(logNames))(settings.askTimeout).mapTo[GetReplicationSourceLogsSuccess].map { reply =>
-      eventCompatibilityDeciders.foreach { case (logName, processor) =>
-        eventLogs.get(logName).foreach(_ ! AddEventCompatibilityDecider(logId(reply.endpointId, logName), processor))
-      }
-      //TODO make sure deciders are added before replicators are started
-      val replicators = reply.sourceLogs.map {
-        case (logName, sourceLog) =>
-          val sourceLogId = logId(reply.endpointId, logName)
-          val targetLogId = logId(id, logName)
-          createReplicator(sourceLogId, sourceLog, targetLogId, eventLogs(logName))
-      }
-      addConnection(reply.endpointId, replicators.toSet)
-      reply.endpointId
+  def connect(remoteEndpoint: ReplicationEndpoint, eventCompatibilityDeciders: Map[String, ReplicationDecider], history: ReplicationHistory): Future[String] =
+    connect(remoteEndpoint.connectionAcceptor, eventCompatibilityDeciders, history)
+
+  def connect(remoteAcceptor: ActorRef, eventCompatibilityDeciders: Map[String, ReplicationDecider] = Map.empty, history: ReplicationHistory = CompleteHistory): Future[String] = {
+    for {
+      targetLogInfos <- Future.traverse(eventLogs) { case (logName, logActor) => getLogInfo(logActor).map(logName -> _) }
+      connectReply <- remoteAcceptor.ask(Connect(id, targetLogInfos.toMap)).mapTo[ConnectSuccess]
+    } yield {
+      startReplicatorsAsync(connectReply, eventCompatibilityDeciders, history)
+      connectReply.endpointId
     }
+  }
 
   def disconnect(remoteEndpointId: String): Unit = {
     removeConnection(remoteEndpointId).foreach(system.stop)
@@ -95,13 +106,38 @@ class ReplicationEndpoint(
   private def createEventLog(logName: String): ActorRef =
     system.actorOf(EventLog.props(logId(id, logName), sourceFilters.getOrElse(logName, NoFilter)))
 
+  private def startReplicatorsAsync(connectReply: ConnectSuccess, eventCompatibilityDeciders: Map[String, ReplicationDecider], history: ReplicationHistory): Unit = {
+    connectReply.sourceLogInfos.foreach {
+      case (logName, LogInfo(sourceLog, sourceCvv, sourceDvv)) =>
+        val targetLog = eventLogs(logName)
+        val sourceLogId = logId(connectReply.endpointId, logName)
+        val targetLogId = logId(id, logName)
+        eventCompatibilityDeciders.get(logName).foreach(targetLog ! AddEventCompatibilityDecider(sourceLogId, _))
+        Retry(startReplicatorAsync(sourceLogId, sourceLog, sourceCvv, sourceDvv, targetLogId, targetLog, history), settings.retryDelay).
+          onSuccess { case replicator => addReplicator(connectReply.endpointId, replicator) }
+    }
+  }
+
+  // TODO Alternatively move logic into Replicator
+  private def startReplicatorAsync(sourceLogId: String, sourceLog: ActorRef, sourceCvv: VectorTime, sourceDvv: VectorTime, targetLogId: String, targetLog: ActorRef, history: ReplicationHistory): Future[ActorRef] = {
+    if (history == NoHistory) targetLog ! MergeForeignIntoCvvDvv(sourceCvv)
+    else if (history == CurrentHistory) targetLog ! MergeForeignIntoCvvDvv(sourceDvv)
+    getLogInfo(targetLog)
+      .map { info =>
+        if (info.currentVersionVector >= sourceDvv || history == CurrentHistory)
+          createReplicator(sourceLogId, sourceLog, targetLogId, targetLog)
+        else
+          throw new IllegalStateException(s"CVV ${info.currentVersionVector} of log $targetLog not >= $sourceDvv of $sourceLogId -> cannot start replication")
+      }
+  }
+
   private def createReplicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: String, targetLog: ActorRef): ActorRef =
     system.actorOf(Props(new Replicator(sourceLogId, sourceLog, targetLogId, targetLog)))
 
-  private def addConnection(remoteEndpointId: String, replicators: Set[ActorRef]): Unit = {
+  private def addReplicator(remoteEndpointId: String, replicator: ActorRef): Unit = {
     _connections.getAndUpdate(new UnaryOperator[Map[String, Set[ActorRef]]] {
       override def apply(t: Map[String, Set[ActorRef]]): Map[String, Set[ActorRef]] =
-        t.updated(remoteEndpointId, replicators)
+        t.updated(remoteEndpointId, t.getOrElse(remoteEndpointId, Set.empty) + replicator)
     })
   }
 
@@ -114,10 +150,27 @@ class ReplicationEndpoint(
 }
 
 private class ReplicationConnectionAcceptor(endpointId: String, sourceLogs: Map[String, ActorRef]) extends Actor {
+
+  private val settings = new ReplicationSettings(context.system.settings.config)
+
+  import context.dispatcher
+  private implicit val askTimeout: Timeout = settings.askTimeout
+
   override def receive = {
-    case GetReplicationSourceLogs(targetLogNames) =>
-      sender() ! GetReplicationSourceLogsSuccess(endpointId, sourceLogs.filterKeys(targetLogNames.contains))
+    case Connect(targetEndpointId, targetLogInfos) =>
+      Future.traverse(sourceLogs.filterKeys(targetLogInfos.contains)) { case (logName, logActor) =>
+        mergeTargetVersionVector(logActor, logId(targetEndpointId, logName), targetLogInfos(logName).currentVersionVector)
+          .flatMap(_ => getLogInfo(logActor).map(logName -> _))
+      } map { logInfos =>
+        ConnectSuccess(endpointId, logInfos.toMap)
+      } pipeTo sender()
   }
+
+  private def mergeTargetVersionVector(logActor: ActorRef, logId: String, versionVector: VectorTime): Future[VectorTime] =
+    logActor.ask(MergeVersionVector(logId, versionVector))
+      .mapTo[MergeVersionVectorSuccess]
+      .map(_.updatedVersionVector)
+
 }
 
 object Replicator {

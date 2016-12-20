@@ -4,6 +4,8 @@ import java.util.concurrent.TimeUnit
 
 import akka.actor.Actor.Receive
 import akka.actor._
+import akka.pattern.ask
+import akka.util.Timeout
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol._
 import com.rbmhtechnology.eventuate.sandbox.EventCompatibility.stopOnUnserializableKeepOthers
 import com.rbmhtechnology.eventuate.sandbox.EventLogWithDeferredDeletion.DeferredDeletionSettings
@@ -17,19 +19,24 @@ import com.rbmhtechnology.eventuate.sandbox.serializer.EventPayloadSerializer
 import com.typesafe.config.Config
 
 import scala.collection.immutable.Seq
+import scala.concurrent.ExecutionContext
+import scala.concurrent.Future
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.duration.DurationLong
 
 trait EventLogOps {
   protected def id: String
-
   protected def versionVector: VectorTime
+
+  protected def deletionVector: VectorTime
 
   protected def read(fromSequenceNo: Long): Seq[EncodedEvent]
 
   protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent]
 
   protected def deleteWhile(cond: EncodedEvent => Boolean): Long
+
+  protected def mergeForeignIntoCvvDvv(versionVector: VectorTime): Unit
 }
 
 trait ProgressStoreOps {
@@ -38,11 +45,11 @@ trait ProgressStoreOps {
 
   protected def progressRead(logId: String): Long
 
-  protected def versionVectorWrite(logId: String, versionVector: VectorTime): Unit
+  protected def targetVersionVectorWrite(logId: String, versionVector: VectorTime): Unit
 
-  protected def versionVectorRead(logId: String): Option[VectorTime]
+  protected def targetVersionVectorRead(logId: String): Option[VectorTime]
 
-  protected def versionVectorReadAll: Map[String, VectorTime]
+  protected def targetVersionVectorReadAll: Map[String, VectorTime]
 }
 
 trait InMemoryEventLog extends EventLogOps {
@@ -92,6 +99,12 @@ trait InMemoryEventLog extends EventLogOps {
     _deletionVector = _deletionVector.merge(merge(deleted.map(_.metadata.vectorTimestamp)))
     deleted.lastOption.map(_.metadata.localSequenceNo).getOrElse(0)
   }
+
+  protected def mergeForeignIntoCvvDvv(versionVector: VectorTime) = {
+    val projectToUnknown = versionVector.projection(_versionVector.value.keySet, negate = true)
+    _versionVector = _versionVector.merge(projectToUnknown)
+    _deletionVector = _deletionVector.merge(projectToUnknown)
+  }
 }
 
 trait InMemoryProgressStore extends ProgressStoreOps {
@@ -99,7 +112,7 @@ trait InMemoryProgressStore extends ProgressStoreOps {
   private var progressStore: Map[String, Long] = Map.empty
 
   /** Maps target log ids to respective version vector */
-  private var versionVectorStore: Map[String, VectorTime] = Map.empty
+  private var targetVersionVectorStore: Map[String, VectorTime] = Map.empty
 
   // API
   protected def progressWrite(progresses: Map[String, Long]): Unit =
@@ -108,14 +121,14 @@ trait InMemoryProgressStore extends ProgressStoreOps {
   protected def progressRead(logId: String): Long =
     progressStore.getOrElse(logId, 0L)
 
-  protected def versionVectorWrite(logId: String, versionVector: VectorTime): Unit =
-    versionVectorStore += logId -> versionVector
+  protected def targetVersionVectorWrite(logId: String, versionVector: VectorTime): Unit =
+    targetVersionVectorStore += logId -> versionVector
 
-  protected def versionVectorRead(logId: String): Option[VectorTime] =
-    versionVectorStore.get(logId)
+  protected def targetVersionVectorRead(logId: String): Option[VectorTime] =
+    targetVersionVectorStore.get(logId)
 
-  override protected def versionVectorReadAll: Map[String, VectorTime] =
-    versionVectorStore
+  override protected def targetVersionVectorReadAll: Map[String, VectorTime] =
+    targetVersionVectorStore
 }
 
 trait EventLogWithImmediateDeletion extends EventLogOps {
@@ -201,7 +214,7 @@ trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: 
   // API
   protected def replicationReceive: Receive = {
     case ReplicationRead(from, num, tlid, tvv) =>
-      versionVectorWrite(tlid, tvv)
+      targetVersionVectorWrite(tlid, tvv)
       replicationRead(from, num, tlid, tvv) match {
         case Right((processedEvents, progress)) =>
           sender() ! ReplicationReadSuccess(processedEvents, progress)
@@ -220,6 +233,14 @@ trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: 
       }
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
+    case GetVersionVectors =>
+      sender() ! GetVersionVectorsSuccess(versionVector, deletionVector)
+    case MergeVersionVector(targetLogId, versionVector) =>
+      val merged = versionVector.merge(targetVersionVectorRead(targetLogId).getOrElse(VectorTime.Zero))
+      targetVersionVectorWrite(targetLogId, merged)
+      sender() ! MergeVersionVectorSuccess(merged)
+    case MergeForeignIntoCvvDvv(versionVector) =>
+      mergeForeignIntoCvvDvv(versionVector)
   }
 
   protected def replicationReadCausalityDecider(targetVersionVector: VectorTime): ReplicationDecider =
@@ -249,7 +270,7 @@ trait EventLogWithDeferredDeletion { this: Actor with EventLogWithReplication =>
     case Delete(toSequenceNo) =>
       deletedToSequenceNo = deleteWhile { event =>
         event.metadata.localSequenceNo <= toSequenceNo &&
-          versionVectorReadAll.values.forall(event.metadata.vectorTimestamp <= _)
+          targetVersionVectorReadAll.values.forall(event.metadata.vectorTimestamp <= _)
       }
       if(deletedToSequenceNo < toSequenceNo)
         scheduler.scheduleOnce(settings.retryDelay, self, Delete(toSequenceNo))
@@ -363,4 +384,9 @@ object EventLog {
 
   def decode(events: Seq[EncodedEvent])(implicit system: ActorSystem): Seq[DecodedEvent] =
     events.map(e => EventPayloadSerializer.decode(e).get)
+
+  def getLogInfo(logActor: ActorRef)(implicit ec: ExecutionContext, askTimeout: Timeout): Future[LogInfo] =
+    logActor.ask(GetVersionVectors)
+      .mapTo[GetVersionVectorsSuccess]
+      .map(vvs => LogInfo(logActor, vvs.currentVersionVector, vvs.deletionVector))
 }

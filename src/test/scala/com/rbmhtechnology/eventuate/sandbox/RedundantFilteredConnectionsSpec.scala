@@ -26,7 +26,8 @@ object RedundantFilteredConnectionsSpec {
 
   private def reconnectFirstIfMoreThan(updated: Vector[(Location, Location)], n: Int) =
     if (updated.size >= n) {
-      bidiConnect _ tupled updated.head
+      val (loc1, loc2) = updated.head
+      bidiConnect(loc1, loc2)
       updated.tail
     } else
       updated
@@ -142,7 +143,7 @@ class RedundantFilteredConnectionsSpec extends WordSpec with Matchers with Befor
         continueIfDisconnected(firstLocation, disconnected)
         false
     }
-    disconnected.foreach(bidiConnect _ tupled _)
+    disconnected.foreach { case (loc1, loc2) => bidiConnect(loc1, loc2) }
   }
 
   private def continueIfDisconnected(location:Location, disconnected: Seq[(Location, Location)]) =

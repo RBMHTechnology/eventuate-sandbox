@@ -12,11 +12,43 @@ object ReplicationProtocol {
 
   case class AddRedundantFilterConfig(targetLogId: String, config: RedundantFilterConfig)
 
-  case class GetReplicationSourceLogs(logNames: Set[String])
-  case class GetReplicationSourceLogsSuccess(endpointId: String, sourceLogs: Map[String, ActorRef])
+  case class LogInfo(logActor: ActorRef, currentVersionVector: VectorTime, deletionVersionVector: VectorTime)
+
+  /**
+    * Sent by a location to remote locations to begin replicating events from them.
+    *
+    * @param targetLogInfos maps log-names to [[LogInfo]] of logs that shall be connected to
+    *                       remote logs to replicate events from them. These are local logs for
+    *                       the sending side and remote logs for the receiving side (of this message).
+    */
+  case class Connect(endpointId: String, targetLogInfos: Map[String, LogInfo])
+  /**
+    * Sent by a location in reply to a [[Connect]] message.
+    *
+    * @param sourceLogInfos maps log-names to [[LogInfo]] of logs that are source logs for the
+    *                       target logs referenced by the [[Connect]] message.
+    *                       These are local logs for
+    *                       the sending side and remote logs for the receiving side (of this message).
+    */
+  case class ConnectSuccess(endpointId: String, sourceLogInfos: Map[String, LogInfo])
 
   case class GetReplicationProgressAndVersionVector(sourceLogId: String)
   case class GetReplicationProgressAndVersionVectorSuccess(progress: Long, targetVersionVector: VectorTime)
+
+  case object GetVersionVectors
+  case class GetVersionVectorsSuccess(currentVersionVector: VectorTime, deletionVector: VectorTime)
+
+  case class MergeVersionVector(targetLogId: String, versionVector: VectorTime)
+  case class MergeVersionVectorSuccess(updatedVersionVector: VectorTime)
+
+  /**
+    * Merge the foreign parts of `versionVector` into the local current and deletion version vector.
+    *
+    * An entry in `versionVector` is considered foreign if there is no entry in the local current
+    * version vector for its process id, i.e. the location has not yet seen an event from this
+    * process id.
+    */
+  case class MergeForeignIntoCvvDvv(versionVector: VectorTime)
 
   case class ReplicationRead(fromSequenceNo: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime)
   case class ReplicationReadSuccess(events: Seq[EncodedEvent], progress: Long)
