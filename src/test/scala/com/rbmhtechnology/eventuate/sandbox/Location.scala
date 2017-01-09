@@ -86,7 +86,7 @@ object Location {
   }
 }
 
-class Location(id: String) {
+class Location(val id: String) {
 
   import Location._
 

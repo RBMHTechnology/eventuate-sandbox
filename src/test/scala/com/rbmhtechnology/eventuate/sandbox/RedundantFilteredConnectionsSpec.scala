@@ -17,13 +17,19 @@ object RedundantFilteredConnectionsSpec {
   def randomDisconnects(disconnected: Vector[(Location, Location)], applications: Seq[Seq[Location]]): Vector[(Location, Location)] = {
     val Seq(loc1, loc2) = Random.shuffle(Random.shuffle(applications).head.sliding(2).toList).head
     disconnect(loc1, loc2)
-    val updated = disconnected.filterNot(_ == (loc1, loc2)) :+ (loc1, loc2)
-    if(updated.size >= (applications.head.size - 1) * applications.size / 3) {
+    val updated = uniqueAppend(disconnected, (loc1, loc2))
+    reconnectFirstIfMoreThan(updated, (applications.head.size - 1) * applications.size / 3)
+  }
+
+  private def uniqueAppend(disconnected: Vector[(Location, Location)], locations: (Location, Location)) =
+    disconnected.filterNot(_ == locations) :+ locations
+
+  private def reconnectFirstIfMoreThan(updated: Vector[(Location, Location)], n: Int) =
+    if (updated.size >= n) {
       bidiConnect _ tupled updated.head
       updated.tail
     } else
       updated
-  }
 }
 
 class RedundantFilteredConnectionsSpec extends WordSpec with Matchers with BeforeAndAfterEach with Eventually {
@@ -122,18 +128,24 @@ class RedundantFilteredConnectionsSpec extends WordSpec with Matchers with Befor
     }
   }
 
-  def awaitEventDistributionWithRandomDisconnects(applications: Seq[Seq[Location]]) = {
+  private def awaitEventDistributionWithRandomDisconnects(applications: Seq[Seq[Location]]) = {
     val locations = applications.flatten
+    val firstLocation = locations.head
     val lastEmitted = locations.last.emittedExternal.head
     var disconnected = Vector.empty[(Location, Location)]
     var i = 0
-    locations.head.probe.fishForMessage(hint = s"${locations.head.endpoint.id} fish $lastEmitted", max = Location.timeout.duration) {
+    firstLocation.probe.fishForMessage(hint = s"${locations.head.id} fish $lastEmitted", max = Location.timeout.duration) {
       case ev: DecodedEvent if ev.payload == lastEmitted => true
       case _ =>
         i += 1
         if (i % 10 == 0) disconnected = randomDisconnects(disconnected, applications)
+        continueIfDisconnected(firstLocation, disconnected)
         false
     }
     disconnected.foreach(bidiConnect _ tupled _)
   }
+
+  private def continueIfDisconnected(location:Location, disconnected: Seq[(Location, Location)]) =
+    if (disconnected.exists { case (loc1, loc2) => (loc1 eq location) || (loc2 eq location) })
+      location.probe.ref ! "Continue"
 }
