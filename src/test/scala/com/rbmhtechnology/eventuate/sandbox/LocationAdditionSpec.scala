@@ -104,7 +104,7 @@ class LocationAdditionSpec extends WordSpec with Matchers with ScalaFutures with
         val fromA3 = a3.emit(ExternalEvent)
         expectPayloads(fromA3, a1, a3)
 
-        bidiConnect(a2, a3, history = CurrentHistory)
+        bidiConnect(a2, a3, history = CompleteHistory)
         a3.expectNoMsg()
 
         val newFromA2 = a2.emit(ExternalEvent)
