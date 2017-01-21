@@ -8,10 +8,13 @@ import akka.pattern.{ask, pipe}
 import akka.util.Timeout
 import com.rbmhtechnology.eventuate.sandbox.EventLog.getLogInfo
 import com.rbmhtechnology.eventuate.sandbox.EventsourcingProtocol.Delete
+import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint.CompleteHistory
+import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint.CurrentHistory
+import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint.NoHistory
+import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint.ReplicationHistory
 import com.rbmhtechnology.eventuate.sandbox.ReplicationEndpoint.logId
 import com.rbmhtechnology.eventuate.sandbox.ReplicationFilter.NoFilter
 import com.rbmhtechnology.eventuate.sandbox.ReplicationProtocol._
-import com.rbmhtechnology.eventuate.sandbox.future.Retry
 import com.typesafe.config._
 
 import scala.collection.immutable.Seq
@@ -82,10 +85,13 @@ class ReplicationEndpoint(
       targetLogInfos <- Future.traverse(eventLogs) { case (logName, logActor) => getLogInfo(logActor).map(logName -> _) }
       connectReply <- remoteAcceptor.ask(Connect(id, targetLogInfos.toMap)).mapTo[ConnectSuccess]
     } yield {
-      startReplicatorsAsync(connectReply, eventCompatibilityDeciders, history)
+      startReplicators(connectReply.endpointId, zipMapStrict(connectReply.sourceLogInfos, targetLogInfos.toMap), eventCompatibilityDeciders, history)
       connectReply.endpointId
     }
   }
+
+  def zipMapStrict[K, V1, V2](map1: Map[K, V1], map2: Map[K, V2]): Map[K, (V1, V2)] =
+    map1.map { case (key, value1) => key -> (value1, map2(key)) }
 
   def disconnect(remoteEndpointId: String): Unit = {
     removeConnection(remoteEndpointId).foreach(system.stop)
@@ -106,33 +112,16 @@ class ReplicationEndpoint(
   private def createEventLog(logName: String): ActorRef =
     system.actorOf(EventLog.props(logId(id, logName), sourceFilters.getOrElse(logName, NoFilter)))
 
-  private def startReplicatorsAsync(connectReply: ConnectSuccess, eventCompatibilityDeciders: Map[String, ReplicationDecider], history: ReplicationHistory): Unit = {
-    connectReply.sourceLogInfos.foreach {
-      case (logName, LogInfo(sourceLog, sourceCvv, sourceDvv)) =>
-        val targetLog = eventLogs(logName)
-        val sourceLogId = logId(connectReply.endpointId, logName)
-        val targetLogId = logId(id, logName)
-        eventCompatibilityDeciders.get(logName).foreach(targetLog ! AddEventCompatibilityDecider(sourceLogId, _))
-        Retry(startReplicatorAsync(sourceLogId, sourceLog, sourceCvv, sourceDvv, targetLogId, targetLog, history), settings.retryDelay).
-          onSuccess { case replicator => addReplicator(connectReply.endpointId, replicator) }
+  private def startReplicators(sourceEndpointId: String, sourceAndTargetLogInfos: Map[String, (LogInfo, LogInfo)], eventCompatibilityDeciders: Map[String, ReplicationDecider], history: ReplicationHistory): Unit = {
+    sourceAndTargetLogInfos.foreach {
+      case (logName, (sourceInfo, targetInfo)) =>
+        eventCompatibilityDeciders.get(logName).foreach(targetInfo.logActor ! AddEventCompatibilityDecider(sourceInfo.logId, _))
+        addReplicator(sourceEndpointId, createReplicator(sourceInfo, targetInfo, history))
     }
   }
 
-  // TODO Alternatively move logic into Replicator
-  private def startReplicatorAsync(sourceLogId: String, sourceLog: ActorRef, sourceCvv: VectorTime, sourceDvv: VectorTime, targetLogId: String, targetLog: ActorRef, history: ReplicationHistory): Future[ActorRef] = {
-    if (history == NoHistory) targetLog ! MergeForeignIntoCvvDvv(sourceCvv)
-    else if (history == CurrentHistory) targetLog ! MergeForeignIntoCvvDvv(sourceDvv)
-    getLogInfo(targetLog)
-      .map { info =>
-        if (info.currentVersionVector >= sourceDvv || history == CurrentHistory)
-          createReplicator(sourceLogId, sourceLog, targetLogId, targetLog)
-        else
-          throw new IllegalStateException(s"CVV ${info.currentVersionVector} of log $targetLog not >= $sourceDvv of $sourceLogId -> cannot start replication")
-      }
-  }
-
-  private def createReplicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: String, targetLog: ActorRef): ActorRef =
-    system.actorOf(Props(new Replicator(sourceLogId, sourceLog, targetLogId, targetLog)))
+  private def createReplicator(sourceLogInfo: LogInfo, targetLogInfo: LogInfo, history: ReplicationHistory): ActorRef =
+    system.actorOf(Props(new Replicator(sourceLogInfo, targetLogInfo, history)))
 
   private def addReplicator(remoteEndpointId: String, replicator: ActorRef): Unit = {
     _connections.getAndUpdate(new UnaryOperator[Map[String, Set[ActorRef]]] {
@@ -177,7 +166,7 @@ object Replicator {
   case object Continue
 }
 
-private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: String, targetLog: ActorRef) extends Actor {
+private class Replicator(sourceLogInfo: LogInfo, targetLogInfo: LogInfo, history: ReplicationHistory) extends Actor {
   import Replicator._
   import context.dispatcher
 
@@ -189,6 +178,14 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
 
   var schedule: Option[Cancellable] =
     None
+
+  val waiting: Receive = {
+    case GetLogInfoSuccess(LogInfo(_, _, currentVersionVector, _)) if currentVersionVector >= sourceLogInfo.deletionVersionVector =>
+      context.become(fetching)
+      fetch()
+    case GetLogInfoSuccess(_) =>
+      scheduleUpdateTargetInfo()
+  }
 
   val idle: Receive = {
     case Continue =>
@@ -220,22 +217,34 @@ private class Replicator(sourceLogId: String, sourceLog: ActorRef, targetLogId: 
       read(progress + 1L, targetVersionVector)
   }
 
-  override def receive = fetching
+  override def receive = waiting
+
+  private def updateTargetInfo(): Unit =
+    targetLogInfo.logActor ! GetLogInfo
+
+  private def scheduleUpdateTargetInfo(): Unit =
+    scheduler.scheduleOnce(settings.retryDelay)(updateTargetInfo())
 
   private def scheduleRead(): Unit =
     schedule = Some(scheduler.scheduleOnce(settings.retryDelay, self, Continue))
 
   private def fetch(): Unit =
-    targetLog.ask(GetReplicationProgressAndVersionVector(sourceLogId))(settings.askTimeout).pipeTo(self)
+    targetLogInfo.logActor.ask(GetReplicationProgressAndVersionVector(sourceLogInfo.logId))(settings.askTimeout).pipeTo(self)
 
   private def read(fromSequenceNo: Long, targetVersionVector: VectorTime): Unit =
-    sourceLog.ask(ReplicationRead(fromSequenceNo, settings.batchSize, targetLogId, targetVersionVector))(settings.askTimeout).pipeTo(self)
+    sourceLogInfo.logActor.ask(ReplicationRead(fromSequenceNo, settings.batchSize, targetLogInfo.logId, targetVersionVector))(settings.askTimeout).pipeTo(self)
 
   private def write(events: Seq[EncodedEvent], progress: Long): Unit =
-    targetLog.ask(ReplicationWrite(events, sourceLogId, progress))(settings.askTimeout).pipeTo(self)
+    targetLogInfo.logActor.ask(ReplicationWrite(events, sourceLogInfo.logId, progress))(settings.askTimeout).pipeTo(self)
 
-  override def preStart(): Unit =
-    fetch()
+  override def preStart(): Unit = {
+    history match {
+      case NoHistory => targetLogInfo.logActor ! MergeForeignIntoCvvDvv(sourceLogInfo.currentVersionVector)
+      case CurrentHistory => targetLogInfo.logActor ! MergeForeignIntoCvvDvv(sourceLogInfo.deletionVersionVector)
+      case CompleteHistory =>
+    }
+    updateTargetInfo()
+  }
 
   override def postStop(): Unit =
     schedule.foreach(_.cancel())

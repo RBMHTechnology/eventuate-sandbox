@@ -12,7 +12,7 @@ object ReplicationProtocol {
 
   case class AddRedundantFilterConfig(targetLogId: String, config: RedundantFilterConfig)
 
-  case class LogInfo(logActor: ActorRef, currentVersionVector: VectorTime, deletionVersionVector: VectorTime)
+  case class LogInfo(logActor: ActorRef, logId: String, currentVersionVector: VectorTime, deletionVersionVector: VectorTime)
 
   /**
     * Sent by a location to remote locations to begin replicating events from them.
@@ -35,8 +35,8 @@ object ReplicationProtocol {
   case class GetReplicationProgressAndVersionVector(sourceLogId: String)
   case class GetReplicationProgressAndVersionVectorSuccess(progress: Long, targetVersionVector: VectorTime)
 
-  case object GetVersionVectors
-  case class GetVersionVectorsSuccess(currentVersionVector: VectorTime, deletionVector: VectorTime)
+  case object GetLogInfo
+  case class GetLogInfoSuccess(logInfo: LogInfo)
 
   case class MergeVersionVector(targetLogId: String, versionVector: VectorTime)
   case class MergeVersionVectorSuccess(updatedVersionVector: VectorTime)

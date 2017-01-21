@@ -26,6 +26,7 @@ import scala.concurrent.duration.DurationLong
 
 trait EventLogOps {
   protected def id: String
+
   protected def versionVector: VectorTime
 
   protected def deletionVector: VectorTime
@@ -233,8 +234,8 @@ trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: 
       }
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
-    case GetVersionVectors =>
-      sender() ! GetVersionVectorsSuccess(versionVector, deletionVector)
+    case GetLogInfo =>
+      sender() ! GetLogInfoSuccess(LogInfo(self, id, versionVector, deletionVector))
     case MergeVersionVector(targetLogId, versionVector) =>
       val merged = versionVector.merge(targetVersionVectorRead(targetLogId).getOrElse(VectorTime.Zero))
       targetVersionVectorWrite(targetLogId, merged)
@@ -386,7 +387,5 @@ object EventLog {
     events.map(e => EventPayloadSerializer.decode(e).get)
 
   def getLogInfo(logActor: ActorRef)(implicit ec: ExecutionContext, askTimeout: Timeout): Future[LogInfo] =
-    logActor.ask(GetVersionVectors)
-      .mapTo[GetVersionVectorsSuccess]
-      .map(vvs => LogInfo(logActor, vvs.currentVersionVector, vvs.deletionVector))
+    logActor.ask(GetLogInfo).mapTo[GetLogInfoSuccess].map(_.logInfo)
 }
