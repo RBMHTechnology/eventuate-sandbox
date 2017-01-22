@@ -12,7 +12,7 @@ object ReplicationProtocol {
 
   case class AddRedundantFilterConfig(targetLogId: String, config: RedundantFilterConfig)
 
-  case class LogInfo(logActor: ActorRef, logId: String, currentVersionVector: VectorTime, deletionVersionVector: VectorTime)
+  case class LogInfo(logActor: ActorRef, logId: String, currentSequenceNo: Long, deletedToSeqNo: Long)
 
   /**
     * Sent by a location to remote locations to begin replicating events from them.
@@ -38,17 +38,10 @@ object ReplicationProtocol {
   case object GetLogInfo
   case class GetLogInfoSuccess(logInfo: LogInfo)
 
-  case class MergeVersionVector(targetLogId: String, versionVector: VectorTime)
-  case class MergeVersionVectorSuccess(updatedVersionVector: VectorTime)
+  case class InitializeTargetProgress(targetLogId: String)
+  case class InitializeTargetProgressSucess(currentProgress: Long)
 
-  /**
-    * Merge the foreign parts of `versionVector` into the local current and deletion version vector.
-    *
-    * An entry in `versionVector` is considered foreign if there is no entry in the local current
-    * version vector for its process id, i.e. the location has not yet seen an event from this
-    * process id.
-    */
-  case class MergeForeignIntoCvvDvv(versionVector: VectorTime)
+  case class InitializeSourceProgress(sourceLogId: String, sequenceNo: Long)
 
   case class ReplicationRead(fromSequenceNo: Long, num: Int, targetLogId: String, targetVersionVector: VectorTime)
   case class ReplicationReadSuccess(events: Seq[EncodedEvent], progress: Long)

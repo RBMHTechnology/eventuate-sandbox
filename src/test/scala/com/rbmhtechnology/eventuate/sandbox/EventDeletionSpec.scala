@@ -35,7 +35,7 @@ class EventDeletionSpec extends WordSpec with Matchers with BeforeAndAfterEach w
       a2.expectPayloads(emitted)
       eventually(a1.storedPayloads shouldBe emitted.tail)
     }
-    "delete events when replication is filtered" ignore {
+    "delete events when replication is filtered" in {
       // fails as the internal event currently cannot be deleted
       // as following events are not causally dependent
       // and the internal event is not replicated to b2

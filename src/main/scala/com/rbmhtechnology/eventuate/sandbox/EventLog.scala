@@ -29,15 +29,16 @@ trait EventLogOps {
 
   protected def versionVector: VectorTime
 
-  protected def deletionVector: VectorTime
+  protected def sequenceNo: Long
 
   protected def read(fromSequenceNo: Long): Seq[EncodedEvent]
 
   protected def write(events: Seq[EncodedEvent], prepare: (EncodedEvent, Long) => EncodedEvent): Seq[EncodedEvent]
 
-  protected def deleteWhile(cond: EncodedEvent => Boolean): Long
+  protected def deleteWhile(cond: EncodedEvent => Boolean): Unit
 
-  protected def mergeForeignIntoCvvDvv(versionVector: VectorTime): Unit
+  protected def deletedToSeqNo: Long
+
 }
 
 trait ProgressStoreOps {
@@ -46,18 +47,18 @@ trait ProgressStoreOps {
 
   protected def progressRead(logId: String): Long
 
-  protected def targetVersionVectorWrite(logId: String, versionVector: VectorTime): Unit
+  protected def targetProgressWrite(logId: String, seqNo: Long): Unit
 
-  protected def targetVersionVectorRead(logId: String): Option[VectorTime]
+  protected def targetProgressRead(logId: String): Option[Long]
 
-  protected def targetVersionVectorReadAll: Map[String, VectorTime]
+  protected def targetVersionVectorReadAll: Map[String, Long]
 }
 
 trait InMemoryEventLog extends EventLogOps {
   // Implementation
   private var _sequenceNo: Long = 0L
   private var _versionVector: VectorTime = VectorTime.Zero
-  private var _deletionVector: VectorTime = VectorTime.Zero
+  private var _deletedToSeqNo: Long = 0L
 
   private var eventStore: Vector[EncodedEvent] = Vector.empty
 
@@ -65,8 +66,11 @@ trait InMemoryEventLog extends EventLogOps {
   protected def versionVector: VectorTime =
     _versionVector
 
-  protected def deletionVector: VectorTime =
-    _deletionVector
+  override protected def sequenceNo: Long =
+    _sequenceNo
+
+  override protected def deletedToSeqNo: Long =
+    _deletedToSeqNo
 
   protected def read(fromSequenceNo: Long): Seq[EncodedEvent] =
     eventStore.dropWhile(_.metadata.localSequenceNo < fromSequenceNo)
@@ -94,17 +98,15 @@ trait InMemoryEventLog extends EventLogOps {
     written
   }
 
-  protected def deleteWhile(cond: EncodedEvent => Boolean): Long = {
+  protected def deleteWhile(cond: EncodedEvent => Boolean): Unit = {
     val (deleted, updatedEventStore) = eventStore.span(cond)
     eventStore = updatedEventStore
-    _deletionVector = _deletionVector.merge(merge(deleted.map(_.metadata.vectorTimestamp)))
-    deleted.lastOption.map(_.metadata.localSequenceNo).getOrElse(0)
+    _deletedToSeqNo = deleted.lastOption.map(_.metadata.localSequenceNo).getOrElse(0L)
   }
 
   protected def mergeForeignIntoCvvDvv(versionVector: VectorTime) = {
     val projectToUnknown = versionVector.projection(_versionVector.value.keySet, negate = true)
     _versionVector = _versionVector.merge(projectToUnknown)
-    _deletionVector = _deletionVector.merge(projectToUnknown)
   }
 }
 
@@ -113,7 +115,7 @@ trait InMemoryProgressStore extends ProgressStoreOps {
   private var progressStore: Map[String, Long] = Map.empty
 
   /** Maps target log ids to respective version vector */
-  private var targetVersionVectorStore: Map[String, VectorTime] = Map.empty
+  private var targetVersionVectorStore: Map[String, Long] = Map.empty
 
   // API
   protected def progressWrite(progresses: Map[String, Long]): Unit =
@@ -122,13 +124,13 @@ trait InMemoryProgressStore extends ProgressStoreOps {
   protected def progressRead(logId: String): Long =
     progressStore.getOrElse(logId, 0L)
 
-  protected def targetVersionVectorWrite(logId: String, versionVector: VectorTime): Unit =
-    targetVersionVectorStore += logId -> versionVector
+  protected def targetProgressWrite(logId: String, seqNo: Long): Unit =
+    targetVersionVectorStore += logId -> seqNo
 
-  protected def targetVersionVectorRead(logId: String): Option[VectorTime] =
+  protected def targetProgressRead(logId: String): Option[Long] =
     targetVersionVectorStore.get(logId)
 
-  override protected def targetVersionVectorReadAll: Map[String, VectorTime] =
+  override protected def targetVersionVectorReadAll: Map[String, Long] =
     targetVersionVectorStore
 }
 
@@ -215,7 +217,7 @@ trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: 
   // API
   protected def replicationReceive: Receive = {
     case ReplicationRead(from, num, tlid, tvv) =>
-      targetVersionVectorWrite(tlid, tvv)
+      targetProgressWrite(tlid, from - 1)
       replicationRead(from, num, tlid, tvv) match {
         case Right((processedEvents, progress)) =>
           sender() ! ReplicationReadSuccess(processedEvents, progress)
@@ -235,13 +237,15 @@ trait EventLogWithReplication extends EventLogOps with ProgressStoreOps { this: 
     case GetReplicationProgressAndVersionVector(logId) =>
       sender() ! GetReplicationProgressAndVersionVectorSuccess(progressRead(logId), versionVector)
     case GetLogInfo =>
-      sender() ! GetLogInfoSuccess(LogInfo(self, id, versionVector, deletionVector))
-    case MergeVersionVector(targetLogId, versionVector) =>
-      val merged = versionVector.merge(targetVersionVectorRead(targetLogId).getOrElse(VectorTime.Zero))
-      targetVersionVectorWrite(targetLogId, merged)
-      sender() ! MergeVersionVectorSuccess(merged)
-    case MergeForeignIntoCvvDvv(versionVector) =>
-      mergeForeignIntoCvvDvv(versionVector)
+      sender() ! GetLogInfoSuccess(LogInfo(self, id, sequenceNo, deletedToSeqNo))
+    case InitializeTargetProgress(targetLogId) =>
+      val progress = targetProgressRead(targetLogId).getOrElse {
+        targetProgressWrite(targetLogId, 0)
+        0L
+      }
+      sender() ! InitializeTargetProgressSucess(progress)
+    case InitializeSourceProgress(sourceLogId, seqNo) =>
+      progressWrite(Map(sourceLogId -> seqNo))
   }
 
   protected def replicationReadCausalityDecider(targetVersionVector: VectorTime): ReplicationDecider =
@@ -265,15 +269,13 @@ trait EventLogWithDeferredDeletion { this: Actor with EventLogWithReplication =>
 
   import context.dispatcher
 
-  private var deletedToSequenceNo: Long = 0L
-
   protected def deleteReceive(): Receive = {
     case Delete(toSequenceNo) =>
-      deletedToSequenceNo = deleteWhile { event =>
+      deleteWhile { event =>
         event.metadata.localSequenceNo <= toSequenceNo &&
-          targetVersionVectorReadAll.values.forall(event.metadata.vectorTimestamp <= _)
+          targetVersionVectorReadAll.values.forall(event.metadata.localSequenceNo <= _)
       }
-      if(deletedToSequenceNo < toSequenceNo)
+      if(deletedToSeqNo < toSequenceNo)
         scheduler.scheduleOnce(settings.retryDelay, self, Delete(toSequenceNo))
   }
 }
